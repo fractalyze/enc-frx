@@ -50,6 +50,34 @@ you already hold, test-vector work, and research are what it is for.
 Bootstrapping. Work is tracked on the
 [issues](https://github.com/fractalyze/enc-frx/issues).
 
+## Development
+
+The build is Bazel — bzlmod, with a hermetic Python 3.11 toolchain:
+
+```sh
+bazel test //...
+```
+
+`hash-frx` rides the module graph, pinned by commit in
+[`MODULE.bazel`](MODULE.bazel). To build against a local checkout instead:
+
+```sh
+echo 'common --override_module=hash_frx=/abs/path/to/hash-frx' >> .bazelrc.user
+```
+
+The frx build in [`requirements.in`](requirements.in) must stay equal to the one
+`hash-frx` pins. `hash-frx` resolves frx from its own lock, so skew puts two
+different frx copies on one test's `sys.path` — which surfaces as a dtype error,
+not as a version conflict. Move both pins together or neither.
+
+`pre-commit` covers formatting, typing, and the commit message. The message hook
+runs at the `commit-msg` stage, which `pre-commit install` alone does not wire up
+— install both:
+
+```sh
+pre-commit install --hook-type pre-commit --hook-type commit-msg
+```
+
 ## License
 
 Licensed under the Apache License, Version 2.0 (see [LICENSE](LICENSE)).
