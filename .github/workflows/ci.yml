@@ -14,6 +14,10 @@ on:
   # every parameter set runs daily rather than never.
   schedule:
     - cron: "0 17 * * *"
+  # Re-running a run replays the matrix the `setup` job produced at the time, so
+  # a change to `HAS_GPU_RUNNER` or a runner coming back online needs a fresh
+  # run rather than a rerun. Without this, that means an empty commit.
+  workflow_dispatch:
 
 # Cancel in-progress runs for PRs (same head branch), but never cancel pushes
 # to main so that every merge gets a full CI run.
