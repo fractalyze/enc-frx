@@ -1,0 +1,140 @@
+# Coding conventions
+
+> Code, symbols, and file paths are English.
+
+This page carries only what is specific to implementing encryption schemes. The
+rules every FRX consumer shares — `@jit` placement, `for` vs `lax.scan` vs
+`vmap`, pytree registration mechanics, seam conformance pins, the `testing/`
+layout, the comment rules — are not repeated here. They are identical in every
+repo built on FRX, and a copy per repo is exactly how they drift apart.
+
+## The batch is the compilation unit
+
+`decaps` and `open` take the whole batch and trace as one computation. The `@jit`
+boundary belongs around them, never around a per-message body that a driver loop
+calls `B` times.
+
+This is what the seams exist to enforce — there is no scalar entry point to
+implement, so a Python loop over the batch axis is a bug rather than a slow path.
+`keygen` batches with `frx.vmap` when a caller needs it.
+
+Where the parallelism *is* differs per primitive and the implementation must say
+which it is. ChaCha20's blocks are independent given the counter, so a whole
+batch is one array and a `scan` over blocks would serialize the only source of
+parallelism. Poly1305 and GHASH are Horner chains: parallel across the batch,
+sequential within a message, and a `scan` on the block axis is correct.
+
+## Failure is a value, and the two seams disagree on purpose
+
+Nothing here raises. A traced batch has no exception that means "entry 7 failed",
+so a failure is data — and the two seams carry it in opposite directions.
+
+**`Aead.open` must report failure.** It returns `(plaintext, ok)` with `ok` a
+`bool[B]`, and **the plaintext of a failing entry comes back masked**, not raw.
+Releasing unverified plaintext is a standing AEAD misuse, and a seam that handed
+back the raw decryption beside a flag is one a caller eventually reads without
+checking the flag. Masking makes forgetting cost zeros instead of
+attacker-chosen bytes.
+
+**`Kem.decaps` must not report failure.** ML-KEM's FO transform requires implicit
+rejection: a malformed ciphertext yields a *different* shared secret, derived
+deterministically from the decapsulation key's rejection seed. A validity flag
+here would hand an attacker the exact bit the transform exists to withhold. The
+seam has no failure channel for that reason, and the input checks that reject a
+malformed key route through the same path rather than raising.
+
+Both comparisons are arithmetic reductions over the full input, never an early
+exit and never a `lax.cond`.
+
+## Nonce discipline belongs to the caller
+
+A scheme takes a nonce; it does not generate one. What a scheme assumes about
+uniqueness, and what breaks when that is violated, is stated on its page — and
+"what breaks" is not uniform: reusing a nonce under one GCM key leaks the
+authentication key `H` and forges everything under it thereafter, which is
+sharper than the corresponding ChaCha20-Poly1305 failure.
+
+One nonce per batch entry, and a scheme that can offer a wider nonce says why a
+caller would want it.
+
+## Keys and ciphertexts are bytes at the seam
+
+They cross as `uint8` arrays in the standard's encoding, not as scheme-named
+pytrees: a consumer holds bytes, and a seam taking a structured form would make
+it call a scheme-specific decode first — which means naming the scheme, which is
+what the seam exists to prevent. A scheme parses its own encoding on entry.
+
+Inside a scheme, whatever crosses a `jit` / `vmap` boundary is a registered
+frozen dataclass, and a scheme instance carried as pytree aux needs value-based
+`__eq__`/`__hash__`. Identity equality does not error; it silently re-traces the
+enclosing zone for every freshly built instance, so it surfaces as a slow call
+and never as a failure.
+
+Randomness is an argument, never sampled inside a traced function. A standard's
+derandomized entry point — ML-KEM's `encaps_internal` — lives below the seam on
+the scheme, because the harness that needs it already names the scheme.
+
+## Cite the standard, by section
+
+A magic constant, a domain separator, a padding rule, or a bit order carries the
+document and section it comes from: `# FIPS 203 §4.2.1`, not `# compression`.
+This code is easy to write plausibly and wrongly, and the section number is what
+lets a reviewer check it rather than agree with it.
+
+Bit and byte order deserve the citation most. GCM specifies its field elements in
+reflected order while `binary_field_ghash` is the natural basis, and a convention
+mismatch produces a wrong answer for every input while looking like a field bug.
+
+## Known-answer tests are the gate
+
+A scheme that reproduces every published ciphertext has proven nothing about
+rejection. An `open` that returns `ok = True` unconditionally passes every
+positive vector ever published, and a `decaps` whose rejection path is dead
+passes them too — that path is only reached when the ciphertext is wrong.
+
+So the negative cases are half the gate, and they are per seam:
+
+- **AEAD** — a flipped bit in the tag, the ciphertext, the associated data, and
+  the nonce each set `ok = False` *and* mask the plaintext.
+- **KEM** — a malformed ciphertext produces the implicit-rejection secret, the
+  specific expected value, not merely something different.
+
+**Mixed-validity batches are their own case.** A batch where entries 3 and 7 fail
+must mask 3 and 7 and nothing else. A masking bug applied batch-wide passes every
+all-valid and every all-invalid set, so a suite without a mixed batch has not
+tested the batch axis at all.
+
+Self-consistency is not evidence either. Seal-then-open round-trips forever
+inside a self-consistent wrong implementation. Property-based tests supplement
+the KATs; they never replace them.
+
+An exhaustive sweep — every parameter set against every published vector — is
+tagged `slow_kat`, which drops it from the per-PR run and keeps it in the
+scheduled one.
+
+### Vectors are fetched and pinned, never committed
+
+A vector set is declared as an `http_file` in [`MODULE.bazel`](../../MODULE.bazel)
+with a sha256 and a URL pinned to a specific upstream commit, and reaches a test
+through `data`. The published sets run to tens of megabytes, and committing them
+taxes every clone forever for data that never changes after publication. The
+sha256 means a swapped or truncated fetch fails the build rather than silently
+changing what a scheme is gated on, and the repository cache makes every build
+after the first offline.
+
+Pin the URL to a commit, never a branch: NIST regenerates these files in place,
+and a moving URL turns an upstream regeneration into a mystery failure here.
+
+## Scheme doc skeleton
+
+Every page in [`../schemes/`](../schemes) answers three things, and everything
+else is optional — don't pad to fill a template.
+
+- **What the standard fixes and what this implementation chooses.** Parameter
+  sets, encodings, and bit orders are the standard's; the batching, the loop
+  shapes, and the pytree layout are this repo's.
+- **Where the batch axis is, and where it is not.** Which operations batch, and
+  which parts are sequential within a message.
+- **What leaks, and what the caller owes.** The scheme's data-dependent
+  operations by name (see [`security.md`](security.md)), and its nonce
+  assumption.
