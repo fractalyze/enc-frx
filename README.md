@@ -45,12 +45,18 @@ service that decapsulates or opens adversary-supplied ciphertexts under a
 long-lived key on a machine an adversary can measure. Batch processing over data
 you already hold, test-vector work, and research are what it is for.
 
+The full reasoning, and what it obliges each scheme to do, is in
+[`docs/reference/security.md`](docs/reference/security.md).
+
 ## Status
 
 Bootstrapping. Work is tracked on the
 [issues](https://github.com/fractalyze/enc-frx/issues).
 
 ## Development
+
+Conventions, the security posture, and per-scheme design notes live in
+[`docs/`](docs/README.md).
 
 The build is Bazel — bzlmod, with a hermetic Python 3.11 toolchain:
 
