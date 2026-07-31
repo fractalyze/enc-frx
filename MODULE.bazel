@@ -50,3 +50,50 @@ pip.parse(
     requirements_lock = "//:requirements_lock_3_11.txt",
 )
 use_repo(pip, "enc_frx_pip")
+
+# Known-answer vectors are fetched and pinned, never committed. The published
+# sets run to hundreds of kilobytes today and grow with every parameter set,
+# which is a permanent tax on every clone for data that never changes after
+# publication. `http_file` pins content by sha256, so a corrupted or swapped
+# fetch fails the build, and the repository cache makes every build after the
+# first offline.
+#
+# The URLs are pinned to one ACVP-Server commit rather than a branch: NIST
+# regenerates these files, and a moving URL would turn a vector regeneration
+# upstream into a mystery failure here.
+http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+
+# The ACVP JSON split: prompt.json carries the inputs, expectedResults.json the
+# outputs, joined on (tgId, tcId). Both halves are needed for one vector set.
+http_file(
+    name = "acvp_ml_kem_keygen_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "3f9ce34f6c836c77958bad2729e837c3b213f44ac36c3065976e7acca6389523",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-KEM-keyGen-FIPS203/prompt.json"],
+)
+
+http_file(
+    name = "acvp_ml_kem_keygen_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "a253d0ad91c95ebea5b409673defef0aa49d65d4ed72286399e2e798ddf073a4",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-KEM-keyGen-FIPS203/expectedResults.json"],
+)
+
+# The encapDecap set carries four functions, not two. Beyond encapsulation and
+# decapsulation it publishes `encapsulationKeyCheck` and `decapsulationKeyCheck`
+# — the §7.2 and §7.3 input validation — which are the only groups here with a
+# published verdict. The decapsulation cases carry none, because under implicit
+# rejection a modified ciphertext yields a shared secret rather than a failure.
+http_file(
+    name = "acvp_ml_kem_encapdecap_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "998e22dfb12efb14ce9fdff911ca634b13612819a1806f25da69adba7e16db91",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-KEM-encapDecap-FIPS203/prompt.json"],
+)
+
+http_file(
+    name = "acvp_ml_kem_encapdecap_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "9089ec6ff2424da9f2782b89b2f831a329a3e28d6e5e24b802b78ff36ac61cdf",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ML-KEM-encapDecap-FIPS203/expectedResults.json"],
+)

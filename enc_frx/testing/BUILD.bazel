@@ -97,3 +97,54 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# The known-answer harness. testonly, and deliberately not part of the shipped
+# package: a consumer runs schemes, not their gate.
+py_library(
+    name = "kat",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "kat.py",
+    ],
+    visibility = ["//enc_frx:__subpackages__"],
+    deps = [
+        "//enc_frx:aead",
+        "//enc_frx:kem",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_test(
+    name = "kat_test",
+    size = "small",
+    srcs = ["kat_test.py"],
+    deps = [
+        ":kat",
+        ":toy_aead",
+        ":toy_kem",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# Runs the loader over NIST's published files, fetched and sha256-pinned in
+# //MODULE.bazel rather than committed.
+py_test(
+    name = "acvp_vectors_test",
+    size = "small",
+    srcs = ["acvp_vectors_test.py"],
+    data = [
+        "@acvp_ml_kem_encapdecap_expected//file",
+        "@acvp_ml_kem_encapdecap_prompt//file",
+        "@acvp_ml_kem_keygen_expected//file",
+        "@acvp_ml_kem_keygen_prompt//file",
+    ],
+    deps = [
+        ":kat",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+    ] + GPU_PLUGIN_DEPS,
+)

@@ -98,7 +98,11 @@ So the negative cases are half the gate, and they are per seam:
 - **AEAD** — a flipped bit in the tag, the ciphertext, the associated data, and
   the nonce each set `ok = False` *and* mask the plaintext.
 - **KEM** — a malformed ciphertext produces the implicit-rejection secret, the
-  specific expected value, not merely something different.
+  specific expected value, not merely something different. Those cases are not
+  labelled: ACVP publishes an expected shared secret for every decapsulation
+  case and marks none of them as a rejection, because under implicit rejection
+  there is no verdict to mark. Comparing the secret exactly is what gates them,
+  so a run that never reaches decapsulation has never executed the path.
 
 **Mixed-validity batches are their own case.** A batch where entries 3 and 7 fail
 must mask 3 and 7 and nothing else. A masking bug applied batch-wide passes every
