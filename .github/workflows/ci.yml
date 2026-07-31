@@ -9,14 +9,11 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
-  # The full known-answer sweep. Per-PR runs drop the `slow_kat`-tagged suites
-  # (see .bazelrc.ci); this run puts them back, so an exhaustive sweep across
-  # every parameter set runs daily rather than never.
+  # Puts back the `slow_kat` suites .bazelrc.ci drops per PR.
   schedule:
     - cron: "0 17 * * *"
-  # Re-running a run replays the matrix the `setup` job produced at the time, so
-  # a change to `HAS_GPU_RUNNER` or a runner coming back online needs a fresh
-  # run rather than a rerun. Without this, that means an empty commit.
+  # A rerun replays the matrix `setup` already produced, so a HAS_GPU_RUNNER
+  # change needs a fresh run.
   workflow_dispatch:
 
 # Cancel in-progress runs for PRs (same head branch), but never cancel pushes
@@ -25,24 +22,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Runners are labelled by capability, not by role — a CPU box is
-# `[self-hosted, cpu]` and a GPU box is `[self-hosted, gpu]` — so each leg lands
-# on a box advertising what it needs and the CPU leg never starves behind a busy
-# GPU box.
+# Runners are labelled by capability, not role: a CPU box is `[self-hosted, cpu]`,
+# a GPU box `[self-hosted, gpu]`.
 #
-# The matrix is built by a job rather than written statically, which is the
-# opposite of `hash-frx`'s shape and needs its reason stated. `hash-frx` has GPU
-# runner access and requires its GPU leg, so a static entry is right there: a
-# leg a variable can make absent can never be a required check, since branch
-# protection waits forever on a context that never reports.
-#
-# This repo has no GPU runner access. A static entry would put a job on every
-# pull request that no runner picks up — permanently queued, which reads as
-# "still running" rather than as "not configured". So the leg is gated on
-# `HAS_GPU_RUNNER` and is absent until access exists, and correspondingly is not
-# a required check. When access is granted, this becomes a static matrix and the
-# context joins branch protection. (A job-level `if` cannot read `matrix`, hence
-# a job rather than a condition.)
+# No GPU runner serves this repo yet, so the GPU leg is gated on HAS_GPU_RUNNER
+# and stays absent — a static entry would queue on every PR, which reads as
+# "still running" rather than "not configured". A gated leg cannot be a required
+# check; make the matrix static when access lands. (A job-level `if` can't read
+# `matrix`, hence the setup job.)
 jobs:
   setup:
     runs-on: ubuntu-latest
@@ -52,14 +39,11 @@ jobs:
     steps:
       - id: set
         run: |
-          # One `flags` bag per leg, so the test step has no shell branch. The
-          # CPU leg executes on the Buildbarn pool (`--config=remote`, see
-          # //.bazelrc.rbe) with machine-local mTLS material. The pool is
-          # CPU-only, so the GPU leg executes locally and passes no remote
-          # flags; `cuda` is strict — no cpu fallback — so a green leg really
-          # ran on the device, and preallocation is off because bazel runs test
-          # actions concurrently against that one device and each process would
-          # otherwise claim most of its memory.
+          # One `flags` bag per leg keeps the test step branch-free. The pool is
+          # CPU-only, so the GPU leg runs local with no remote flags; strict
+          # `cuda` (no cpu fallback) proves a green leg ran on the device, and
+          # prealloc is off because bazel runs test actions concurrently against
+          # the one device.
           rbe='--config=remote --tls_certificate=/etc/rbe-certs/ca.pem --tls_client_certificate=/etc/rbe-certs/client.pem --tls_client_key=/etc/rbe-certs/client.key'
           cpu='{"backend":"cpu","runs_on":["self-hosted","cpu"],"frx_platforms":"cpu","flags":"'"${rbe}"'"}'
           gpu='{"backend":"gpu","runs_on":["self-hosted","gpu"],"frx_platforms":"cuda","flags":"--test_env=XLA_PYTHON_CLIENT_PREALLOCATE=false"}'
@@ -68,10 +52,8 @@ jobs:
             include="${cpu},${gpu}"
           fi
           echo "matrix={\"include\":[${include}]}" >> "$GITHUB_OUTPUT"
-          # A CLI --test_tag_filters *replaces* .bazelrc.ci's, so passing an
-          # empty one is how the scheduled sweep drops the `slow_kat` exclusion
-          # and runs everything. Empty string on a PR run, which leaves
-          # .bazelrc.ci's default in place.
+          # A CLI --test_tag_filters *replaces* .bazelrc.ci's, so an empty one
+          # is how the sweep drops the `slow_kat` exclusion.
           tag_filters=""
           if [ "${{ github.event_name }}" = "schedule" ]; then
             tag_filters="--test_tag_filters="
@@ -90,9 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # No setup-bazel: it clobbers the box's ~/.bazelrc (self-hosted runners
-      # already persist bazel + caches). `.bazelrc.ci` is passed explicitly
-      # because it is not auto-imported — it drops the slow sweeps a PR doesn't
-      # need.
+      # already persist bazel + caches). `.bazelrc.ci` is not auto-imported.
       - name: Run bazel test
         run: |
           set -euo pipefail
@@ -109,8 +89,6 @@ jobs:
           name: bazel-test-logs-${{ matrix.backend }}
 
   pre-commit:
-    # The pin-bump PRs are authored by this account; their generated diffs are
-    # already formatted and their subjects are not written to the convention.
     if: github.actor != 'fractalyze-dev'
     runs-on: ubuntu-latest
     steps:
@@ -125,8 +103,7 @@ jobs:
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
-      # --all-files rather than a diff range: the tree is small enough that the
-      # whole-repo run is cheap, and it catches a violation that arrives in a
+      # --all-files rather than a diff range: catches a violation arriving in a
       # file the PR did not touch (a hook version bump, a new rule).
       - name: Run pre-commit
         run: |
