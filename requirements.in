@@ -1,0 +1,27 @@
+# enc-frx runtime dependencies.
+#
+# Pulled from the Fractalyze package index alongside upstream PyPI:
+#   pip install -r requirements.in \
+#     --extra-index-url https://fractalyze.github.io/pypi/simple/
+#
+# hash-frx — the symmetric layer ML-KEM's sampling and hashing run through — is
+# absent on purpose: it is a Bazel module, pinned by commit in //MODULE.bazel,
+# not a wheel.
+#
+# The frx build is pinned to the one hash-frx pins, and the two must move
+# together: hash-frx resolves frx from its own lock, so skew puts two different
+# frx copies on one test's sys.path.
+#
+# zk_dtypes arrives via frx but is pinned here directly, because this repo has a
+# floor of its own on it. AES and GCM are defined over binary fields this stack
+# carries natively — `binary_field_gf8_aes` (GF(2^8), AES's reduction polynomial)
+# and `binary_field_ghash` (GF(2^128), GCM's) — and those dtypes register in the
+# frx frontend from zk_dtypes >= 0.0.10. Taken transitively, a frx bump could
+# drop the thing AES-GCM is built on without anything here saying so.
+absl-py
+numpy
+frx==0.10.1.dev20260730045722
+frxlib==0.10.1.dev20260730045722
+frx-cuda12-pjrt==0.10.1.dev20260730045722
+frx-cuda12-plugin==0.10.1.dev20260730045722
+zk-dtypes==0.0.10

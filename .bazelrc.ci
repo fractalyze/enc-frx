@@ -1,0 +1,11 @@
+# CI-only Bazel settings. Loaded explicitly by the CI workflow
+# (`bazel --bazelrc=.bazelrc.ci ...`); it is NOT auto-imported, so a local
+# `bazel test //...` still runs every target.
+#
+# `slow_kat` — the exhaustive known-answer sweeps: every parameter set of a
+# scheme against every published vector. They are the standards-exactness gate,
+# so they must run, but a full sweep per PR makes review painful. The scheduled
+# CI run puts them back (see .github/workflows/ci.yml); tag a suite `slow_kat`
+# only when it is genuinely a sweep, since a tag here is a suite that does not
+# gate a merge.
+test --test_tag_filters=-slow_kat
