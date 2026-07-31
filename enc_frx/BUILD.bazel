@@ -1,3 +1,4 @@
+load("@enc_frx_pip//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_library")
 
 # The package marker. Carries `__version__`, which dev-release stamps; the seams
@@ -7,4 +8,22 @@ py_library(
     name = "enc_frx",
     srcs = ["__init__.py"],
     visibility = ["//visibility:public"],
+)
+
+# The seam for key encapsulation. Names no scheme, so a consumer can code against
+# it before any scheme exists.
+py_library(
+    name = "kem",
+    srcs = ["kem.py"],
+    visibility = ["//visibility:public"],
+    deps = [requirement("frx")],
+)
+
+# The seam for authenticated encryption. Separate from `kem` because their
+# failure semantics are opposites — see either module's docstring.
+py_library(
+    name = "aead",
+    srcs = ["aead.py"],
+    visibility = ["//visibility:public"],
+    deps = [requirement("frx")],
 )
