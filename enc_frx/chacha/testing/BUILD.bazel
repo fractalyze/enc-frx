@@ -1,0 +1,27 @@
+load("@enc_frx_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_test")
+load("//:defs.bzl", "GPU_PLUGIN_DEPS")
+
+py_test(
+    name = "chacha20_test",
+    size = "small",
+    srcs = ["chacha20_test.py"],
+    deps = [
+        "//enc_frx/chacha:chacha20",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "poly1305_test",
+    size = "small",
+    srcs = ["poly1305_test.py"],
+    deps = [
+        "//enc_frx/chacha:poly1305",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
