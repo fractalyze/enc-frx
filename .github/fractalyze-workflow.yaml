@@ -1,0 +1,34 @@
+# enc-frx — board extensions for the fractalyze-plugins workflow.
+#
+# enc-frx carries few schemes but two distinct families, so the board's
+# primary axis is the Family being worked on rather than the scheme.
+# `Seam` covers the Kem and Aead Protocols and the KAT harness; `Shared`
+# covers what more than one family builds on; `Infra` catches build, CI,
+# and cross-cutting work. Two views: Family lanes for day-to-day,
+# Milestone rollup for week-over-week.
+#
+# Schema lives in `fractalyze/claude-plugins` (workflow plugin).
+
+board_extensions:
+  fields:
+    - name: Family
+      type: single_select
+      options: [Seam, AEAD, ML-KEM, Shared, Infra, none]
+      derive_from_labels:
+        Seam: area:seam
+        AEAD: area:aead
+        ML-KEM: area:ml-kem
+        Shared: area:shared
+        Infra: area:infra
+        _fallback: none
+
+  views:
+    - name: Family kanban
+      type: board
+      group_by: Family
+      column_by: Status
+
+    - name: Milestone rollup
+      type: board
+      group_by: Milestone
+      column_by: Status
