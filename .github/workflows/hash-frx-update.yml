@@ -1,0 +1,119 @@
+# Copyright 2026 Fractalyze Inc. All rights reserved.
+#
+# Keeps this repo in step with hash-frx, and moves BOTH pins that depend on it
+# in one PR.
+#
+# hash-frx rides //MODULE.bazel's commit pin while frx comes from the pip lock —
+# and hash-frx resolves frx from its own lock. So the two are one pin, not two:
+# this repo's frx must equal the frx hash-frx pins, or a test loads two different
+# frx copies off one sys.path and fails as a dtype error rather than as a version
+# conflict.
+#
+# That coupling is why there is no separate frx-update workflow here. A dispatch
+# that bumped frx alone would open a PR that is red by construction until
+# hash-frx caught up — noise, not signal. Instead the `frx-update` dispatch is a
+# second trigger for *this* job: it makes the sync run within minutes of a new
+# frx build instead of waiting for the daily poll, and the job still moves the
+# pins only to what hash-frx has actually adopted.
+#
+# hash-frx publishes no wheel and dispatches nothing of its own, so the schedule
+# is the baseline trigger.
+
+name: hash-frx Update
+
+on:
+  schedule:
+    - cron: "0 16 * * *"
+  repository_dispatch:
+    types: [frx-update]
+  workflow_dispatch:
+
+concurrency:
+  group: hash-frx-update
+  cancel-in-progress: true
+
+jobs:
+  bump:
+    # Self-hosted: refreshing MODULE.bazel.lock and recompiling the pip lock both
+    # need bazel, and the box already carries it plus the warm caches.
+    runs-on: [self-hosted, cpu]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BUMPER_GH_PAT }}
+
+      - name: Open a bump PR when either pin is behind hash-frx main
+        env:
+          GH_TOKEN: ${{ secrets.BUMPER_GH_PAT }}
+        run: |
+          set -euo pipefail
+
+          upstream=$(git ls-remote https://github.com/fractalyze/hash-frx.git refs/heads/main | cut -f1)
+          if [ -z "${upstream}" ]; then
+            echo "could not resolve hash-frx main" >&2
+            exit 1
+          fi
+
+          # Exactly one 40-hex commit pin lives in MODULE.bazel (the git_override).
+          # Bail rather than guess if that stops being true.
+          pinned=$(sed -n 's/^ *commit = "\([0-9a-f]\{40\}\)".*/\1/p' MODULE.bazel)
+          if [ "$(printf '%s' "${pinned}" | grep -c .)" != "1" ]; then
+            echo "expected exactly one commit pin in MODULE.bazel, found: ${pinned}" >&2
+            exit 1
+          fi
+
+          # The frx build hash-frx pins AT that commit — read from its lock's
+          # source, so the answer is what this repo has to match rather than
+          # whatever frx published most recently.
+          upstream_frx=$(gh api "repos/fractalyze/hash-frx/contents/requirements.in?ref=${upstream}" \
+                           --jq '.content' | base64 -d | sed -n 's/^frx==\(.*\)$/\1/p')
+          ours_frx=$(sed -n 's/^frx==\(.*\)$/\1/p' requirements.in)
+          if [ -z "${upstream_frx}" ] || [ -z "${ours_frx}" ]; then
+            echo "could not read the frx pin (upstream='${upstream_frx}' ours='${ours_frx}')" >&2
+            exit 1
+          fi
+
+          if [ "${pinned}" = "${upstream}" ] && [ "${ours_frx}" = "${upstream_frx}" ]; then
+            echo "both pins are current (hash-frx ${pinned:0:12}, frx ${ours_frx})"
+            exit 0
+          fi
+
+          branch="bump/hash-frx-${upstream:0:12}"
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            echo "a bump PR for ${upstream:0:12} is already open"
+            exit 0
+          fi
+
+          git checkout -b "${branch}"
+
+          body_pins=""
+          if [ "${pinned}" != "${upstream}" ]; then
+            sed -i "s/${pinned}/${upstream}/" MODULE.bazel
+            # The lock records the resolved module graph, so it moves with the
+            # pin; leaving it stale would put the drift in every contributor's
+            # next diff.
+            bazel mod deps >/dev/null
+            body_pins="${body_pins}- \`hash_frx\` \`git_override\`: \`${pinned:0:12}\` -> \`${upstream:0:12}\`"$'\n'
+          fi
+          if [ "${ours_frx}" != "${upstream_frx}" ]; then
+            # One version string covers frx, frxlib, and both cuda12 plugins.
+            sed -i "s/${ours_frx}/${upstream_frx}/g" requirements.in
+            bazel run //:requirements.update
+            body_pins="${body_pins}- frx stack: \`${ours_frx}\` -> \`${upstream_frx}\`, matching hash-frx's lock"$'\n'
+          fi
+
+          git config user.name 'fractalyze-dev'
+          git config user.email 'fractalyze-dev@users.noreply.github.com'
+          git add MODULE.bazel MODULE.bazel.lock requirements.in requirements_lock_3_11.txt
+          git commit -m "build(deps): sync to hash-frx ${upstream:0:12}"
+          git push -u origin "${branch}"
+
+          gh pr create --base main --head "${branch}" \
+            --title "build(deps): sync to hash-frx ${upstream:0:12}" \
+            --body "$(printf '%s\n' \
+              "${body_pins}" \
+              "Compare: https://github.com/fractalyze/hash-frx/compare/${pinned}...${upstream}" \
+              "" \
+              "The two pins move together on purpose: hash-frx resolves frx from its own lock, so a lone bump on either side puts two frx copies on one test's \`sys.path\`." \
+              "" \
+              "CI is the review: the dependency guard exercises a real hash-frx computation across the pin, so a break in the layer below fails here rather than inside a scheme.")"
