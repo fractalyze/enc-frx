@@ -10,8 +10,8 @@ this file is the map plus the rules every change must respect.
 - **Coding conventions — what implementing a scheme here requires, and only
   that:** [`docs/reference/conventions.md`](docs/reference/conventions.md)
 - **Per-scheme design notes:** [`docs/schemes/README.md`](docs/schemes/README.md)
-- **The two seams every scheme implements:** `enc_frx/kem.py` and
-  `enc_frx/aead.py`
+- **The two seams every scheme implements:** [`enc_frx/kem.py`](enc_frx/kem.py)
+  and [`enc_frx/aead.py`](enc_frx/aead.py)
 - **Detailed design & open decisions:** tracked on GitHub — epic issue
   [fractalyze/enc-frx#1](https://github.com/fractalyze/enc-frx/issues/1).
 

@@ -1,8 +1,9 @@
 # Scheme design notes
 
 One page per scheme, added as the scheme lands. A page is design notes, not an
-API tour: the API is the `Kem` or `Aead` seam plus the scheme's own module, and
-both are readable.
+API tour: the API is the [`Kem`](../../enc_frx/kem.py) or
+[`Aead`](../../enc_frx/aead.py) seam plus the scheme's own module, and both are
+readable.
 
 The three questions every page answers — what the standard fixes versus what this
 implementation chooses, where the batch axis is and is not, and what leaks plus

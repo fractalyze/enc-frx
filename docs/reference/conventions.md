@@ -14,7 +14,8 @@ repo built on FRX, and a copy per repo is exactly how they drift apart.
 boundary belongs around them, never around a per-message body that a driver loop
 calls `B` times.
 
-This is what the seams exist to enforce — there is no scalar entry point to
+This is what the seams exist to enforce ([`kem.py`](../../enc_frx/kem.py),
+[`aead.py`](../../enc_frx/aead.py)) — there is no scalar entry point to
 implement, so a Python loop over the batch axis is a bug rather than a slow path.
 `keygen` batches with `frx.vmap` when a caller needs it.
 
