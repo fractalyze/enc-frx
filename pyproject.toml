@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enc-frx"
+dynamic = ["version"]
+description = "enc-frx — FRX-native encryption: ChaCha20-Poly1305, AES-GCM, and ML-KEM behind the Aead and Kem seams."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "The enc-frx Authors" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+]
+# `frx` and `hash-frx` are declared, so `pip install enc-frx` alone is usable:
+# every scheme traces through frx, and ML-KEM samples through hash-frx. frxlib is
+# not listed because frx already requires it.
+#
+# `zk-dtypes` IS listed, unlike in the sibling repos, and with a floor: AES and
+# GCM are defined over `binary_field_gf8_aes` and `binary_field_ghash`, which
+# register in the frx frontend from 0.0.10. Left to frx's own requirement, a
+# resolver could satisfy it with a build that predates those dtypes.
+#
+# The frx floor carries the `.dev0` sentinel rather than being a plain
+# `>=0.10.1` because a consuming workspace pins an exact continuously-bumped dev
+# build and `0.10.1.devN` sorts BELOW `0.10.1` — a plain floor would reject the
+# very pin requirements.in sets.
+#
+# The GPU plugins (frx-cuda12-*) stay undeclared: they are an install-time
+# platform choice, offered through frx's own `cuda12` extra.
+dependencies = [
+    "absl-py",
+    "numpy",
+    "frx>=0.10.1.dev0",
+    "hash-frx",
+    "zk-dtypes>=0.0.10",
+]
+
+[project.urls]
+Repository = "https://github.com/fractalyze/enc-frx"
+
+[tool.setuptools.dynamic]
+version = { attr = "enc_frx.__version__" }
+
+# Package the runtime tree only. Test-support packages (`*/testing`) are dropped.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["enc_frx*"]
+exclude = ["enc_frx.testing", "enc_frx.testing.*", "enc_frx.*.testing", "enc_frx.*.testing.*"]
+
+# Python tooling config. enc-frx builds via Bazel (MODULE.bazel); the tables
+# below configure pytest, which runs the `*_test.py` module tests.
+[tool.pytest.ini_options]
+testpaths = ["enc_frx"]
+python_files = ["*_test.py"]
+
+# Every def carries full type annotations; mypy's disallow_untyped_defs is what
+# enforces it. Run: `mypy` (uses the files below).
+[tool.mypy]
+python_version = "3.11"
+files = ["enc_frx"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+# Untyped (or, here, unresolvable) third parties: frx is a wheel whose own .pyi
+# stubs don't parse under mypy, so its types collapse to Any; zk_dtypes ships no
+# py.typed; absl only stubs part of its surface. hash_frx resolves through the
+# Bazel module graph rather than site-packages, so mypy run outside Bazel cannot
+# see it. disallow_untyped_defs still enforces our own annotations regardless.
+[[tool.mypy.overrides]]
+module = ["frx.*", "frxlib.*", "zk_dtypes.*", "hash_frx.*", "absl.*", "python.runfiles"]
+ignore_missing_imports = true
