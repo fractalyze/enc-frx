@@ -42,3 +42,18 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+py_library(
+    name = "xchacha20_poly1305",
+    srcs = [
+        "__init__.py",
+        "xchacha20_poly1305.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":chacha20",
+        ":chacha20_poly1305",
+        "//enc_frx:aead",
+        requirement("frx"),
+    ],
+)

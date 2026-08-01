@@ -78,15 +78,48 @@ def _le_bytes(words: list[Array]) -> Array:
     return fnp.stack(lanes, axis=-1)
 
 
-def block_function(state: list[Array]) -> list[Array]:
-    """The 20-round core, RFC 8439 §2.3: twenty rounds plus the feedforward add."""
+def rounds(state: list[Array]) -> list[Array]:
+    """RFC 8439 §2.3.1's twenty rounds, without the feedforward add.
+
+    Separate from `block_function` because HChaCha20 is exactly this and stops
+    here: the feedforward is what makes ChaCha20's core one-way, and dropping it
+    is what lets HChaCha20 expose interior state as a subkey.
+    """
     working = list(state)
     for _ in range(_ROUNDS):
         for indices in _COLUMN_ROUNDS:
             _quarter_round(working, *indices)
         for indices in _DIAGONAL_ROUNDS:
             _quarter_round(working, *indices)
-    return [working[index] + state[index] for index in range(_WORDS)]
+    return working
+
+
+def block_function(state: list[Array]) -> list[Array]:
+    """The 20-round core, RFC 8439 §2.3: twenty rounds plus the feedforward add."""
+    return [word + state[index] for index, word in enumerate(rounds(state))]
+
+
+def hchacha20(key: ArrayLike, nonce: ArrayLike) -> Array:
+    """`uint8 [B, 32]`, `uint8 [B, 16]` -> `uint8 [B, 32]`, per the XChaCha draft.
+
+    The same state layout as `block_function`, but the sixteen-byte nonce fills
+    the counter word as well as the three nonce words, and the result is the
+    first and last rows of the post-round state with **no feedforward add**.
+
+    It lives here rather than beside XChaCha because it is a variant of this
+    core: it shares the rounds and the word layout, and a copy of either would
+    let a fix to one silently miss the other.
+    """
+    key = fnp.asarray(key, dtype=fnp.uint8)
+    nonce = fnp.asarray(nonce, dtype=fnp.uint8)
+    shape = key.shape[:-1]
+    state = (
+        [fnp.full(shape, value, dtype=fnp.uint32) for value in _CONSTANTS]
+        + _le_words(key, 8)
+        + _le_words(nonce, 4)
+    )
+    mixed = rounds(state)
+    return _le_bytes(mixed[:4] + mixed[12:])
 
 
 def initial_state(key: Array, nonce: Array, counters: Array) -> list[Array]:
