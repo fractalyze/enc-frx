@@ -1,0 +1,16 @@
+load("@enc_frx_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_library")
+
+py_library(
+    name = "block",
+    srcs = [
+        "__init__.py",
+        "block.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
