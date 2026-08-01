@@ -78,3 +78,54 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# Reaching CAVP's response files and picking batches out of them. Shared by the
+# gate and the sweep, which run the same vectors at different depths.
+py_library(
+    name = "gcm_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "gcm_vectors.py",
+    ],
+    data = ["@cavp_aes_gcm//:vectors"],
+    visibility = ["//enc_frx:__subpackages__"],
+    deps = [
+        "//enc_frx/testing:kat",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_test(
+    name = "gcm_test",
+    size = "medium",
+    srcs = ["gcm_test.py"],
+    deps = [
+        ":gcm_vectors",
+        "//enc_frx:aead",
+        "//enc_frx/aes:block",
+        "//enc_frx/aes:ctr",
+        "//enc_frx/aes:gcm",
+        "//enc_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The exhaustive pass: every one of CAVP's 47250 cases. Dropped from the per-PR
+# run by .bazelrc.ci and put back by the scheduled one — `gcm_test` is what gates
+# a merge.
+py_test(
+    name = "gcm_sweep_test",
+    size = "enormous",
+    srcs = ["gcm_sweep_test.py"],
+    shard_count = 6,
+    tags = ["slow_kat"],
+    deps = [
+        ":gcm_vectors",
+        "//enc_frx/aes:gcm",
+        "//enc_frx/testing:kat",
+        requirement("absl_py"),
+    ] + GPU_PLUGIN_DEPS,
+)
