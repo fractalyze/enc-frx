@@ -116,6 +116,11 @@ class AesVector:
     key: bytes
     plaintext: bytes
     ciphertext: bytes
+    # CTR publishes the counter block the implementation chose; ECB has none.
+    iv: bytes = b""
+    # ACVP measures a CTR payload in **bits**, and most of its cases are not a
+    # whole number of bytes. Zero where the mode does not publish one.
+    payload_bits: int = 0
     unsupported: tuple[str, ...] = ()
 
 
@@ -604,18 +609,26 @@ def _group_aead_by_shape(vectors: Sequence[AeadVector]) -> list[list[AeadVector]
 
 
 _ACVP_AES_IGNORED_FIELDS = frozenset(
-    {"tgId", "tcId", "testType", "direction", "keyLen", "tests"}
+    {"tgId", "tcId", "testType", "direction", "keyLen", "tests", "payloadLen"}
 )
 
-_ACVP_AES_BYTE_FIELDS = {"key": "key", "pt": "plaintext", "ct": "ciphertext"}
+_ACVP_AES_BYTE_FIELDS = {
+    "key": "key",
+    "pt": "plaintext",
+    "ct": "ciphertext",
+    "iv": "iv",
+}
 
 
-def load_acvp_aes_ecb(
+def load_acvp_aes(
     prompt_path: Path | str, expected_path: Path | str
 ) -> list[AesVector]:
-    """Normalize one ACVP AES-ECB set — a `(prompt, expectedResults)` pair.
+    """Normalize one ACVP AES set — a `(prompt, expectedResults)` pair.
 
-    Both directions and both test types are loaded rather than filtered here: a
+    Covers the modes whose groups carry `direction` and `keyLen` — ECB and CTR
+    share that shape, differing only in whether a counter block is published.
+
+    Both directions and every test type are loaded rather than filtered here: a
     caller that runs only encryption has to *refuse* the rest, and it cannot
     refuse what the loader silently dropped.
     """
@@ -664,6 +677,8 @@ def load_acvp_aes_ecb(
                     key=fields.get("key", b""),
                     plaintext=fields.get("plaintext", b""),
                     ciphertext=fields.get("ciphertext", b""),
+                    iv=fields.get("iv", b""),
+                    payload_bits=merged.get("payloadLen", 0),
                     unsupported=unsupported,
                 )
             )

@@ -14,3 +14,32 @@ py_library(
         requirement("zk_dtypes"),
     ],
 )
+
+py_library(
+    name = "ghash",
+    srcs = [
+        "__init__.py",
+        "ghash.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
+    ],
+)
+
+py_library(
+    name = "ctr",
+    srcs = [
+        "__init__.py",
+        "ctr.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block",
+        ":ghash",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
