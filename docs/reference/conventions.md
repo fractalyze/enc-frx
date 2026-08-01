@@ -25,6 +25,22 @@ batch is one array and a `scan` over blocks would serialize the only source of
 parallelism. Poly1305 and GHASH are Horner chains: parallel across the batch,
 sequential within a message, and a `scan` on the block axis is correct.
 
+## What belongs in hash-frx, and what belongs here
+
+`hash-frx` owns **unkeyed** primitives and the fusion marker seam. Its
+`Permutation` is unkeyed by construction — `permute(state)` takes a state and
+nothing else, and every consumer calls it that way — so a keyed primitive cannot
+be admitted without changing what the seam means.
+
+So a keyed primitive lives with the construction that keys it. AES's round
+function and key schedule are here, under `aes/`, not behind a widened
+`Permutation`.
+
+A fused kernel is available either way and is not an argument for moving code:
+`hash_frx.fusion.fused_region` is public and its marker is deliberately generic —
+zorch already emits it for sumcheck and jagged regions, not only for hashes. What
+`hash-frx` owns is the marker seam, not every marker.
+
 ## There is no 64-bit integer lane
 
 FRX runs with x64 disabled, so a `uint64` request is **silently truncated to

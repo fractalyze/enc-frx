@@ -100,6 +100,25 @@ class AeadVector:
     unsupported: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class AesVector:
+    """One AES block case, normalized out of whatever format published it.
+
+    The block cipher is not a seam implementation — it is an internal primitive
+    of AES-GCM — so this record has a loader and no driver. Its own test is the
+    gate, which `docs/reference/conventions.md` allows on exactly that condition.
+    """
+
+    case_id: str
+    parameter_set: str  # AES-128 / AES-192 / AES-256
+    direction: str  # encrypt / decrypt
+    test_type: str  # AFT (one block) / MCT (a chained Monte Carlo procedure)
+    key: bytes
+    plaintext: bytes
+    ciphertext: bytes
+    unsupported: tuple[str, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
@@ -582,3 +601,70 @@ def _group_aead_by_shape(vectors: Sequence[AeadVector]) -> list[list[AeadVector]
         )
         groups.setdefault(key, []).append(vector)
     return list(groups.values())
+
+
+_ACVP_AES_IGNORED_FIELDS = frozenset(
+    {"tgId", "tcId", "testType", "direction", "keyLen", "tests"}
+)
+
+_ACVP_AES_BYTE_FIELDS = {"key": "key", "pt": "plaintext", "ct": "ciphertext"}
+
+
+def load_acvp_aes_ecb(
+    prompt_path: Path | str, expected_path: Path | str
+) -> list[AesVector]:
+    """Normalize one ACVP AES-ECB set — a `(prompt, expectedResults)` pair.
+
+    Both directions and both test types are loaded rather than filtered here: a
+    caller that runs only encryption has to *refuse* the rest, and it cannot
+    refuse what the loader silently dropped.
+    """
+    prompt = json.loads(Path(prompt_path).read_text())
+    expected = json.loads(Path(expected_path).read_text())
+
+    results = {
+        (group["tgId"], test["tcId"]): test
+        for group in expected["testGroups"]
+        for test in group["tests"]
+    }
+
+    vectors: list[AesVector] = []
+    for group in prompt["testGroups"]:
+        parameter_set = f"AES-{group['keyLen']}"
+        for test in group["tests"]:
+            key = (group["tgId"], test["tcId"])
+            if key not in results:
+                raise KatError(
+                    f"{parameter_set} tg{key[0]}/tc{key[1]} has no expected result; "
+                    f"the prompt and expectedResults files are not a matching pair"
+                )
+            merged = {**group, **results[key], **test}
+            fields = {
+                dest: bytes.fromhex(merged[src])
+                for src, dest in _ACVP_AES_BYTE_FIELDS.items()
+                if src in merged
+            }
+            unsupported = tuple(
+                sorted(
+                    name
+                    for name in merged
+                    if name not in _ACVP_AES_IGNORED_FIELDS
+                    and name not in _ACVP_AES_BYTE_FIELDS
+                )
+            )
+            vectors.append(
+                AesVector(
+                    case_id=(
+                        f"{parameter_set}/{group['direction']}/{group['testType']}"
+                        f"/tg{key[0]}/tc{key[1]}"
+                    ),
+                    parameter_set=parameter_set,
+                    direction=group["direction"],
+                    test_type=group["testType"],
+                    key=fields.get("key", b""),
+                    plaintext=fields.get("plaintext", b""),
+                    ciphertext=fields.get("ciphertext", b""),
+                    unsupported=unsupported,
+                )
+            )
+    return vectors
