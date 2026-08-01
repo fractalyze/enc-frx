@@ -22,6 +22,7 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 from enc_frx.chacha import poly1305
+from enc_frx.chacha.testing.rfc8439_reference import poly1305_mac as _reference
 
 _P = (1 << 130) - 5
 
@@ -31,17 +32,6 @@ _KEY_2_5_2 = bytes.fromhex(
 )
 _MESSAGE_2_5_2 = b"Cryptographic Forum Research Group"
 _TAG_2_5_2 = bytes.fromhex("a8061dc1305136c6c22b8baf0c0127a9")
-
-
-def _reference(key: bytes, message: bytes) -> bytes:
-    """RFC 8439 §2.5 in exact integers — the oracle the limb code answers to."""
-    r = int.from_bytes(key[:16], "little") & 0x0FFFFFFC0FFFFFFC0FFFFFFC0FFFFFFF
-    s = int.from_bytes(key[16:], "little")
-    accumulator = 0
-    for start in range(0, len(message), 16):
-        block = message[start : start + 16]
-        accumulator = (accumulator + int.from_bytes(block + b"\x01", "little")) * r % _P
-    return ((accumulator + s) % (1 << 128)).to_bytes(16, "little")
 
 
 def _mac(key: bytes, message: bytes) -> bytes:
