@@ -52,3 +52,19 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "xchacha20_poly1305_test",
+    size = "small",
+    srcs = ["xchacha20_poly1305_test.py"],
+    deps = [
+        "//enc_frx:aead",
+        "//enc_frx/chacha:chacha20",
+        "//enc_frx/chacha:chacha20_poly1305",
+        "//enc_frx/chacha:xchacha20_poly1305",
+        "//enc_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

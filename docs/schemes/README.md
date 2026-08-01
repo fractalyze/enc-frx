@@ -5,6 +5,10 @@ API tour: the API is the [`Kem`](../../enc_frx/kem.py) or
 [`Aead`](../../enc_frx/aead.py) seam plus the scheme's own module, and both are
 readable.
 
+| Scheme | Where |
+| ------ | ----- |
+| ChaCha20-Poly1305 and XChaCha20-Poly1305 (RFC 8439, draft-irtf-cfrg-xchacha) | [`chacha20-poly1305.md`](chacha20-poly1305.md) |
+
 The three questions every page answers — what the standard fixes versus what this
 implementation chooses, where the batch axis is and is not, and what leaks plus
 what the caller owes — are specified in

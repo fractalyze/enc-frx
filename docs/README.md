@@ -18,6 +18,7 @@ scheme is held to, **[`schemes/`](schemes)** is one design-notes page per scheme
 | Question | Where |
 | -------- | ----- |
 | What a scheme page must answer | [`README.md`](schemes/README.md) |
+| The ChaCha20 family — nonce sizes, where the batch axis is, the limb layout | [`chacha20-poly1305.md`](schemes/chacha20-poly1305.md) |
 
 Detailed design, findings, and open decisions live on the issues, not in the
 tree — the epic is
