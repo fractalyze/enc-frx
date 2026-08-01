@@ -25,6 +25,25 @@ batch is one array and a `scan` over blocks would serialize the only source of
 parallelism. Poly1305 and GHASH are Horner chains: parallel across the batch,
 sequential within a message, and a `scan` on the block axis is correct.
 
+## There is no 64-bit integer lane
+
+FRX runs with x64 disabled, so a `uint64` request is **silently truncated to
+`uint32`** — a warning, not an error, which means an implementation written
+against 64-bit limbs runs and returns wrong numbers. `zk_dtypes` widths do not
+help: `uint128` is a host dtype that no traced array can hold, unlike the binary
+fields, which are registered in the frontend.
+
+So multi-precision arithmetic keeps every intermediate under 2^32 by
+construction, since overflow is silent corruption rather than an error. A product
+must fit in 32 bits, which caps limbs at 16 bits and rules out the layouts most
+reference implementations use.
+
+Two rules follow. A limb layout **states its accumulator bound** where the layout
+is defined, and a test asserts it so a later change to the radix trips. And a
+layout whose margin rests on that bound is gated by a **differential test against
+Python's arbitrary-precision integers**, over extreme inputs as well as random
+ones — a published vector set never approaches the worst case.
+
 ## Failure is a value, and the two seams disagree on purpose
 
 Nothing here raises. A traced batch has no exception that means "entry 7 failed",
