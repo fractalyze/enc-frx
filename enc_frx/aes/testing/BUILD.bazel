@@ -1,5 +1,5 @@
 load("@enc_frx_pip//:requirements.bzl", "requirement")
-load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
 py_test(
@@ -29,6 +29,50 @@ py_binary(
     srcs = ["sbox_bench.py"],
     deps = [
         "//enc_frx/aes:block",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# SP 800-38D §6.3's own algorithm, in plain Python — independent of the dtype the
+# traced implementation uses.
+py_library(
+    name = "gcm_reference",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "gcm_reference.py",
+    ],
+    visibility = ["//enc_frx:__subpackages__"],
+)
+
+py_test(
+    name = "ghash_test",
+    size = "small",
+    srcs = ["ghash_test.py"],
+    deps = [
+        ":gcm_reference",
+        "//enc_frx/aes:ghash",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "ctr_test",
+    size = "medium",
+    srcs = ["ctr_test.py"],
+    data = [
+        "@acvp_aes_ctr_expected//file",
+        "@acvp_aes_ctr_prompt//file",
+    ],
+    deps = [
+        "//enc_frx/aes:block",
+        "//enc_frx/aes:ctr",
+        "//enc_frx/testing:kat",
+        "@rules_python//python/runfiles",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),

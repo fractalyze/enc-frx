@@ -27,7 +27,7 @@ from frx import Array
 from python.runfiles import runfiles
 
 from enc_frx.aes import block
-from enc_frx.testing.kat import AesVector, KatError, load_acvp_aes_ecb, to_bytes
+from enc_frx.testing.kat import AesVector, KatError, load_acvp_aes, to_bytes
 
 _PARAMETER_SETS = ("AES-128", "AES-192", "AES-256")
 
@@ -39,7 +39,7 @@ def _path(repo: str, name: str) -> str:
 
 
 def _vectors() -> list[AesVector]:
-    return load_acvp_aes_ecb(
+    return load_acvp_aes(
         _path("acvp_aes_ecb_prompt", "prompt.json"),
         _path("acvp_aes_ecb_expected", "expectedResults.json"),
     )
@@ -126,7 +126,7 @@ class AcvpVectorTest(parameterized.TestCase):
 
     def test_a_bad_pairing_is_an_error(self) -> None:
         with self.assertRaisesRegex(KatError, "no expected result"):
-            load_acvp_aes_ecb(
+            load_acvp_aes(
                 _path("acvp_aes_ecb_prompt", "prompt.json"),
                 _path("acvp_ml_kem_keygen_expected", "expectedResults.json"),
             )

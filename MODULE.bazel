@@ -116,3 +116,20 @@ http_file(
     sha256 = "4893c2718529d4af5a10f10335118e5a462808a0857005440c52b1083d71da18",
     urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ACVP-AES-ECB-1.0/expectedResults.json"],
 )
+
+# ACVP's AES-CTR set. Its expected results carry the counter block the
+# implementation chose, so a case is `(key, iv, pt) -> ct` rather than the
+# prompt alone.
+http_file(
+    name = "acvp_aes_ctr_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "35bdaf6ba04315aa28637efd22c61a3c34bed426d4bf5a3b2ae8069fca2b9cec",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ACVP-AES-CTR-1.0/prompt.json"],
+)
+
+http_file(
+    name = "acvp_aes_ctr_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "3b6a8aabcc230c8277fa638814353f702a4d2f320a0a60ad3f078fc94bb83e7e",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ACVP-AES-CTR-1.0/expectedResults.json"],
+)
