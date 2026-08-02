@@ -63,6 +63,8 @@ use_repo(pip, "enc_frx_pip")
 # upstream into a mystery failure here.
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
 # The ACVP JSON split: prompt.json carries the inputs, expectedResults.json the
 # outputs, joined on (tgId, tcId). Both halves are needed for one vector set.
 http_file(
@@ -132,4 +134,36 @@ http_file(
     downloaded_file_path = "expectedResults.json",
     sha256 = "3b6a8aabcc230c8277fa638814353f702a4d2f320a0a60ad3f078fc94bb83e7e",
     urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ACVP-AES-CTR-1.0/expectedResults.json"],
+)
+
+# CAVP's GCM vectors, which gate AES-GCM. An archive rather than the `http_file`
+# every other set uses, because NIST publishes these as one zip of six response
+# files — three key lengths, each with an encrypt and a decrypt set.
+#
+# CAVP rather than ACVP's `ACVP-AES-GCM-1.0`, for two reasons that only show up
+# on inspection. That set is AES-128 alone, so it cannot gate the other two key
+# lengths at all. And ACVP measures a payload in *bits*: its CTR set is mostly
+# not a whole number of bytes, which CTR absorbs with a documented mask and GCM
+# could not, since the tag covers the ciphertext and a masked ciphertext is a
+# different computation rather than a different encoding. Every CAVP length —
+# payload, associated data, IV, and tag — is a whole number of bytes, so the
+# question does not arise.
+#
+# The set is also the negative gate: the decrypt files publish 11908 cases whose
+# expected result is `FAIL`, covering shapes hand-written corruption would not
+# think of.
+#
+# There is no commit to pin to, so the sha256 carries the whole weight here. That
+# is sound for this file in a way it would not be for a moving branch: CAVS
+# generated it in 2012 and CAVP does not regenerate its legacy sets.
+http_archive(
+    name = "cavp_aes_gcm",
+    build_file_content = """filegroup(
+    name = "vectors",
+    srcs = glob(["*.rsp"]),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023",
+    urls = ["https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip"],
 )

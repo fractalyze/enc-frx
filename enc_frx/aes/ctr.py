@@ -100,9 +100,4 @@ def initial_counter(subkey: ArrayLike, iv: ArrayLike) -> Array:
         one = fnp.zeros((*iv.shape[:-1], _COUNTER_BYTES), dtype=fnp.uint8)
         return fnp.concatenate([iv, one.at[..., -1].set(1)], axis=-1)
 
-    padded = ghash.pad_to_blocks(iv)
-    trailing = fnp.broadcast_to(
-        ghash.length_block(0, iv.shape[-1])[None, :],
-        (*iv.shape[:-1], 1, BLOCK_SIZE),
-    )
-    return ghash.ghash(subkey, fnp.concatenate([padded, trailing], axis=-2))
+    return ghash.ghash(subkey, ghash.hash_input(None, iv))

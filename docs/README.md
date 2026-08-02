@@ -19,6 +19,7 @@ scheme is held to, **[`schemes/`](schemes)** is one design-notes page per scheme
 | -------- | ----- |
 | What a scheme page must answer | [`README.md`](schemes/README.md) |
 | The ChaCha20 family — nonce sizes, where the batch axis is, the limb layout | [`chacha20-poly1305.md`](schemes/chacha20-poly1305.md) |
+| AES-GCM — the tag length as a parameter, and why a repeated nonce costs the key | [`aes-gcm.md`](schemes/aes-gcm.md) |
 
 Detailed design, findings, and open decisions live on the issues, not in the
 tree — the epic is

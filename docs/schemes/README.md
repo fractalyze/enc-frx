@@ -8,6 +8,7 @@ readable.
 | Scheme | Where |
 | ------ | ----- |
 | ChaCha20-Poly1305 and XChaCha20-Poly1305 (RFC 8439, draft-irtf-cfrg-xchacha) | [`chacha20-poly1305.md`](chacha20-poly1305.md) |
+| AES-GCM (NIST SP 800-38D) | [`aes-gcm.md`](aes-gcm.md) |
 
 The three questions every page answers — what the standard fixes versus what this
 implementation chooses, where the batch axis is and is not, and what leaks plus

@@ -43,3 +43,19 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+py_library(
+    name = "gcm",
+    srcs = [
+        "__init__.py",
+        "gcm.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block",
+        ":ctr",
+        ":ghash",
+        "//enc_frx:aead",
+        requirement("frx"),
+    ],
+)
