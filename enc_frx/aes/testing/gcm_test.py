@@ -9,15 +9,16 @@ is `gcm_sweep_test`, which is tagged `slow_kat` and runs on the schedule.
 
 Splitting them is a cost decision with one real consequence, so it is stated here
 rather than left implicit. `check_aead` derives a tampered batch per entry, so it
-is quadratic in a group and cannot run over the whole set; the sweep is linear and
-cannot see a mixed verdict inside one batch. Neither alone is the gate this repo
-says it wants, and the batches below are what makes the quadratic half affordable
-every time.
+is quadratic in a group and cannot run over the whole set. What the sweep cannot
+reach is therefore exactly the tampering the standard never published: a moved
+nonce, a moved associated-data byte, and knowing *which* input was corrupted. The
+batches below are what makes that half affordable on every PR.
 
 **The mixed-validity batch comes from the standard.** CAVP's decrypt sections are
 roughly half `FAIL`, so a batch drawn from one already mixes verdicts and the
 masking requirement is checked against published expectations rather than against
-corruption invented here.
+corruption invented here. The sweep gets that property too, since grouping by
+shape puts a section's passes and failures in one batch.
 
 The structural tests cover what no vector can. A vector cannot see that the
 payload's keystream starts one counter block after the tag's mask — get that
@@ -32,16 +33,15 @@ from __future__ import annotations
 import inspect
 
 import frx
-import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
-from frx import Array
 
 from enc_frx.aead import Aead
 from enc_frx.aes import block, ctr
 from enc_frx.aes.gcm import TAG_SIZES, AesGcm
 from enc_frx.aes.testing import gcm_vectors
-from enc_frx.testing.kat import check_aead, to_bytes
+from enc_frx.aes.testing.gcm_vectors import array as _array
+from enc_frx.testing.kat import KatError, check_aead, load_cavp_gcm, to_bytes
 
 # Four entries is the whole cost knob: `check_aead` runs four tamperings against
 # every entry of a batch, so the gate's runtime is roughly quadratic in this.
@@ -51,20 +51,28 @@ _DEFAULT_NONCE_SIZE = 12
 _FULL_TAG_SIZE = 16
 
 
-def _array(data: bytes) -> Array:
-    return fnp.asarray(np.frombuffer(data, dtype=np.uint8))[None]
-
-
 class CavpGateTest(parameterized.TestCase):
+    def _check_corner(self, key_size: int, nonce_size: int, tag_size: int) -> None:
+        """One published instance's mixed batch, through the full gate.
+
+        The decrypt files are what the corners are drawn from: their sections are
+        roughly half `FAIL`, so the batch mixes verdicts and the masking
+        requirement is checked against published expectations rather than against
+        corruption invented here.
+        """
+        vector_set = gcm_vectors.instance(
+            gcm_vectors.DECRYPT_FILES, key_size, nonce_size, tag_size
+        )
+        batch = gcm_vectors.mixed_batch(vector_set, _BATCH)
+        self.assertLen(batch, _BATCH)
+        check_aead(AesGcm(key_size, nonce_size, tag_size), batch)
+
     @parameterized.parameters(*sorted(gcm_vectors.ENCRYPT_FILES))
     def test_each_key_length_reproduces_the_published_ciphertexts(
         self, key_size: int
     ) -> None:
         vector_set = gcm_vectors.instance(
-            gcm_vectors.ENCRYPT_FILES[key_size],
-            key_size,
-            _DEFAULT_NONCE_SIZE,
-            _FULL_TAG_SIZE,
+            gcm_vectors.ENCRYPT_FILES, key_size, _DEFAULT_NONCE_SIZE, _FULL_TAG_SIZE
         )
         batch = gcm_vectors.accepted_batch(vector_set, _BATCH)
         self.assertLen(batch, _BATCH)
@@ -74,40 +82,21 @@ class CavpGateTest(parameterized.TestCase):
     def test_each_key_length_agrees_with_the_published_verdicts(
         self, key_size: int
     ) -> None:
-        vector_set = gcm_vectors.instance(
-            gcm_vectors.DECRYPT_FILES[key_size],
-            key_size,
-            _DEFAULT_NONCE_SIZE,
-            _FULL_TAG_SIZE,
-        )
-        batch = gcm_vectors.mixed_batch(vector_set, _BATCH)
-        # The mixed-validity requirement, met by the published set rather than by
-        # corruption invented here. `check_aead` is what asserts that exactly the
-        # failing entries come back masked.
-        self.assertEqual({v.valid for v in batch}, {True, False})
-        check_aead(AesGcm(key_size, _DEFAULT_NONCE_SIZE, _FULL_TAG_SIZE), batch)
+        self._check_corner(key_size, _DEFAULT_NONCE_SIZE, _FULL_TAG_SIZE)
 
     @parameterized.parameters(*gcm_vectors.NONCE_SIZES)
     def test_both_initial_counter_constructions(self, nonce_size: int) -> None:
         # 12 bytes is used directly as `J_0`'s prefix; 1 and 128 are hashed
         # through GHASH. The branch has its own unit test in `ctr_test`; what
         # this adds is that GCM reaches the right one, against vectors.
-        vector_set = gcm_vectors.instance(
-            gcm_vectors.DECRYPT_FILES[16], 16, nonce_size, _FULL_TAG_SIZE
-        )
-        batch = gcm_vectors.mixed_batch(vector_set, _BATCH)
-        check_aead(AesGcm(16, nonce_size, _FULL_TAG_SIZE), batch)
+        self._check_corner(16, nonce_size, _FULL_TAG_SIZE)
 
     @parameterized.parameters(*(size for size in TAG_SIZES if size != _FULL_TAG_SIZE))
     def test_each_truncated_tag_length(self, tag_size: int) -> None:
         # A truncated tag is a different verifier, not a different call, so each
         # length is gated as its own scheme instance. The full-length case is
         # covered by the key-length tests above.
-        vector_set = gcm_vectors.instance(
-            gcm_vectors.DECRYPT_FILES[16], 16, _DEFAULT_NONCE_SIZE, tag_size
-        )
-        batch = gcm_vectors.mixed_batch(vector_set, _BATCH)
-        check_aead(AesGcm(16, _DEFAULT_NONCE_SIZE, tag_size), batch)
+        self._check_corner(16, _DEFAULT_NONCE_SIZE, tag_size)
 
 
 class PublishedSetTest(absltest.TestCase):
@@ -155,11 +144,102 @@ class PublishedSetTest(absltest.TestCase):
             )
 
     def test_every_published_length_is_a_whole_number_of_bytes(self) -> None:
-        # The loader refuses a ragged section, so reaching this point at all is
-        # the assertion; it is stated as a test because it is the reason this set
-        # is usable and ACVP's is not.
+        # The reason this set is usable and ACVP's is not. Asserted over the real
+        # files here; that the loader *refuses* a ragged one is `LoaderRefusalTest`,
+        # since no published section reaches that branch.
         for name in gcm_vectors.FILES:
-            self.assertNotEmpty(gcm_vectors.sets(name), name)
+            for vector_set in gcm_vectors.sets(name):
+                self.assertNotEmpty(vector_set.vectors, name)
+
+
+# One well-formed case, as the template the refusals below each break one way.
+# A fixture rather than a real file on purpose: every branch under test is one
+# CAVP never takes, so the published files cannot exercise them.
+_WELL_FORMED = """# CAVS 14.0
+[Keylen = 128]
+[IVlen = 96]
+[PTlen = 0]
+[AADlen = 0]
+[Taglen = 128]
+
+Count = 0
+Key = 000102030405060708090a0b0c0d0e0f
+IV = 000102030405060708090a0b
+PT =
+AAD =
+CT =
+Tag = 000102030405060708090a0b0c0d0e0f
+"""
+
+
+class LoaderRefusalTest(absltest.TestCase):
+    """What the loader will not run. A loader is only as good as its refusals.
+
+    `acvp_vectors_test`'s rule — a loader tested on a fixture tests the fixture —
+    governs the *positive* path, and the real files carry that here. A refusal
+    branch has the opposite problem: it is unreachable from any published file, so
+    a fixture is the only way to execute it at all.
+    """
+
+    def _load(self, text: str) -> list:
+        path = self.create_tempfile("vectors.rsp", content=text)
+        return load_cavp_gcm(path.full_path)
+
+    def test_the_template_itself_loads(self) -> None:
+        # Without this, a refusal below could pass for the wrong reason.
+        loaded = self._load(_WELL_FORMED)
+        self.assertLen(loaded, 1)
+        vector_set = loaded[0]
+        self.assertEqual(
+            (vector_set.key_size, vector_set.nonce_size, vector_set.tag_size),
+            (16, 12, 16),
+        )
+        self.assertTrue(vector_set.vectors[0].valid)
+        self.assertIsNone(vector_set.vectors[0].associated_data)
+
+    def test_a_sub_byte_length_is_refused(self) -> None:
+        # The branch the whole CAVP-over-ACVP choice rests on.
+        with self.assertRaisesRegex(KatError, "whole number of bytes"):
+            self._load(_WELL_FORMED.replace("[PTlen = 0]", "[PTlen = 4]"))
+
+    def test_an_unknown_section_parameter_is_refused(self) -> None:
+        with self.assertRaisesRegex(KatError, "unknown section parameter"):
+            self._load(
+                _WELL_FORMED.replace("[Taglen = 128]", "[Taglen = 128]\n[Wat = 1]")
+            )
+
+    def test_a_field_disagreeing_with_its_section_is_refused(self) -> None:
+        with self.assertRaisesRegex(KatError, "declares Keylen"):
+            self._load(_WELL_FORMED.replace("[Keylen = 128]", "[Keylen = 256]"))
+
+    def test_a_fail_marker_outside_a_case_is_refused(self) -> None:
+        with self.assertRaisesRegex(KatError, "FAIL outside a case"):
+            self._load(_WELL_FORMED.replace("Count = 0", "FAIL\nCount = 0"))
+
+    def test_an_unparseable_line_is_refused(self) -> None:
+        with self.assertRaisesRegex(KatError, "cannot parse"):
+            self._load(_WELL_FORMED + "\nnot a field\n")
+
+    def test_a_file_with_no_cases_is_refused(self) -> None:
+        with self.assertRaisesRegex(KatError, "no cases"):
+            self._load("[Keylen = 128]\n")
+
+    def test_an_unrecognized_field_is_recorded_rather_than_dropped(self) -> None:
+        # Not a raise: the loader records it and `check_aead` refuses the run, so
+        # a CAVS field nobody has seen surfaces as a refusal at the driver.
+        loaded = self._load(_WELL_FORMED + "Extra = 00\n")
+        self.assertEqual(loaded[0].vectors[0].unsupported, ("Extra",))
+
+    def test_a_rejected_case_needs_no_plaintext(self) -> None:
+        # The one asymmetry in the length checks: `FAIL` publishes no `PT`, and
+        # requiring one would reject half of every decrypt file.
+        rejected = _WELL_FORMED.replace("[PTlen = 0]", "[PTlen = 128]")
+        rejected = rejected.replace("PT =\n", "").replace(
+            "CT =", "CT = 000102030405060708090a0b0c0d0e0f"
+        )
+        loaded = self._load(rejected + "FAIL\n")
+        self.assertFalse(loaded[0].vectors[0].valid)
+        self.assertEqual(loaded[0].vectors[0].plaintext, b"")
 
 
 class TagLengthTest(absltest.TestCase):
@@ -283,7 +363,7 @@ class ConstructionTest(absltest.TestCase):
         self.assertIsInstance(AesGcm(), Aead)
 
     def test_it_traces_as_one_computation(self) -> None:
-        vector_set = gcm_vectors.instance(gcm_vectors.ENCRYPT_FILES[16], 16, 12, 16)
+        vector_set = gcm_vectors.instance(gcm_vectors.ENCRYPT_FILES, 16, 12, 16)
         vector = gcm_vectors.accepted_batch(vector_set, 1)[0]
         scheme = AesGcm(16, 12, 16)
         sealed = frx.jit(scheme.seal)(
@@ -295,20 +375,14 @@ class ConstructionTest(absltest.TestCase):
         self.assertEqual(to_bytes(sealed[0]), vector.ciphertext)
 
     def test_a_batch_of_one_is_not_a_special_case(self) -> None:
-        vector_set = gcm_vectors.instance(gcm_vectors.ENCRYPT_FILES[16], 16, 12, 16)
+        vector_set = gcm_vectors.instance(gcm_vectors.ENCRYPT_FILES, 16, 12, 16)
         batch = gcm_vectors.accepted_batch(vector_set, 3)
         scheme = AesGcm(16, 12, 16)
         together = scheme.seal(
-            fnp.asarray(np.stack([np.frombuffer(v.key, np.uint8) for v in batch])),
-            fnp.asarray(np.stack([np.frombuffer(v.nonce, np.uint8) for v in batch])),
-            fnp.asarray(
-                np.stack(
-                    [np.frombuffer(v.associated_data or b"", np.uint8) for v in batch]
-                )
-            ),
-            fnp.asarray(
-                np.stack([np.frombuffer(v.plaintext, np.uint8) for v in batch])
-            ),
+            gcm_vectors.stack([v.key for v in batch]),
+            gcm_vectors.stack([v.nonce for v in batch]),
+            gcm_vectors.stack([v.associated_data or b"" for v in batch]),
+            gcm_vectors.stack([v.plaintext for v in batch]),
         )
         for index, vector in enumerate(batch):
             alone = scheme.seal(

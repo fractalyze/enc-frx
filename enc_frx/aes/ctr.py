@@ -58,17 +58,6 @@ def _inc32(counter: Array, blocks: int) -> Array:
     return fnp.concatenate([heads, bytes_out], axis=-1)
 
 
-def increment(counter: ArrayLike) -> Array:
-    """`uint8 [B, 16]` -> the same counter advanced one block.
-
-    GCM needs the step on its own rather than as part of a keystream: SP 800-38D
-    §7.1 masks the tag with `E_K(J_0)` but starts the payload's keystream at
-    `inc32(J_0)`, so the two entry points below are called with counters that
-    differ by exactly this.
-    """
-    return _inc32(fnp.asarray(counter, dtype=fnp.uint8), 2)[..., 1, :]
-
-
 def keystream(round_keys: list[Array], counter: ArrayLike, blocks: int) -> Array:
     """`Nr + 1` round keys `[B, 4, 4]`, `uint8 [B, 16]` -> `uint8 [B, blocks * 16]`.
 
@@ -111,9 +100,4 @@ def initial_counter(subkey: ArrayLike, iv: ArrayLike) -> Array:
         one = fnp.zeros((*iv.shape[:-1], _COUNTER_BYTES), dtype=fnp.uint8)
         return fnp.concatenate([iv, one.at[..., -1].set(1)], axis=-1)
 
-    padded = ghash.pad_to_blocks(iv)
-    trailing = fnp.broadcast_to(
-        ghash.length_block(0, iv.shape[-1])[None, :],
-        (*iv.shape[:-1], 1, BLOCK_SIZE),
-    )
-    return ghash.ghash(subkey, fnp.concatenate([padded, trailing], axis=-2))
+    return ghash.ghash(subkey, ghash.hash_input(None, iv))

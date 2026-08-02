@@ -10,10 +10,19 @@ TEST ONLY. Never re-exported from the package.
 from __future__ import annotations
 
 import functools
+from collections.abc import Sequence
 
+import frx.numpy as fnp
+import numpy as np
+from frx import Array
 from python.runfiles import runfiles
 
-from enc_frx.testing.kat import AeadVector, AeadVectorSet, load_cavp_gcm
+from enc_frx.testing.kat import (
+    AeadVector,
+    AeadVectorSet,
+    group_aead_by_shape,
+    load_cavp_gcm,
+)
 
 # One file per key length and direction, which is how CAVP splits the set. The
 # key length is in the name; the IV, payload, associated-data and tag lengths
@@ -58,49 +67,65 @@ def sets(name: str) -> tuple[AeadVectorSet, ...]:
     return tuple(load_cavp_gcm(path(name)))
 
 
-def instance(name: str, key_size: int, nonce_size: int, tag_size: int) -> AeadVectorSet:
+def instance(
+    files: dict[int, str], key_size: int, nonce_size: int, tag_size: int
+) -> AeadVectorSet:
+    """One scheme instance out of the file that publishes that key length.
+
+    Takes the file *map* rather than a file, because one CAVP file is one key
+    length: passing both would let a caller name a key size the file cannot hold.
+    """
+    name = files[key_size]
     for vector_set in sets(name):
-        if (vector_set.key_size, vector_set.nonce_size, vector_set.tag_size) == (
-            key_size,
-            nonce_size,
-            tag_size,
-        ):
+        if (vector_set.nonce_size, vector_set.tag_size) == (nonce_size, tag_size):
             return vector_set
     raise AssertionError(
-        f"{name} publishes no AES-{key_size * 8} instance with a {nonce_size}-byte "
-        f"IV and a {tag_size}-byte tag"
+        f"{name} publishes no instance with a {nonce_size}-byte IV and a "
+        f"{tag_size}-byte tag"
     )
 
 
-def _shape_groups(
-    vector_set: AeadVectorSet,
-) -> dict[tuple[int, int], list[AeadVector]]:
-    """Split an instance by byte lengths, as the harness does internally.
+def array(data: bytes) -> Array:
+    """One byte string as a batch of one."""
+    return fnp.asarray(np.frombuffer(data, dtype=np.uint8))[None]
 
-    A batch axis needs one static shape, and a CAVP instance deliberately varies
-    the payload and associated-data lengths across its sections.
-    """
-    groups: dict[tuple[int, int], list[AeadVector]] = {}
-    for vector in vector_set.vectors:
-        key = (len(vector.associated_data or b""), len(vector.ciphertext))
-        groups.setdefault(key, []).append(vector)
-    return groups
+
+def stack(items: Sequence[bytes]) -> Array:
+    """Equal-length byte strings as a batch."""
+    return fnp.asarray(
+        np.stack([np.frombuffer(item, dtype=np.uint8) for item in items])
+    )
 
 
 def _gate_group(vector_set: AeadVectorSet) -> list[AeadVector]:
     """The shape group the gate runs: the smallest with both a payload and an AAD.
 
-    Both non-empty so that all four of the harness's tamperings say something. A
-    flipped associated-data byte is skipped when there is no associated data, and
-    a flipped *first ciphertext byte* lands inside the tag when the payload is
-    empty — which is the tag tampering over again rather than a second check.
+    Partitioned by the harness's own `group_aead_by_shape`, so the batch selected
+    here is by construction a batch the driver will form rather than one that
+    merely resembles it.
+
+    Both parts non-empty so that all four of the harness's tamperings say
+    something. A flipped associated-data byte is skipped when there is no
+    associated data, and a flipped *first ciphertext byte* lands inside the tag
+    when the payload is empty — which is the tag tampering over again rather than
+    a second check.
 
     Smallest, because the gate runs on every PR and the tampering pass is
     quadratic in the group; the long payloads are the sweep's job.
     """
-    groups = _shape_groups(vector_set)
-    key = min(k for k in groups if k[0] > 0 and k[1] > vector_set.tag_size)
-    return groups[key]
+    groups = [
+        group
+        for group in group_aead_by_shape(vector_set.vectors)
+        if group[0].associated_data and len(group[0].ciphertext) > vector_set.tag_size
+    ]
+    assert groups, "a CAVP instance publishes sections with both an AAD and a payload"
+    return min(
+        groups,
+        key=lambda group: (
+            len(group[0].associated_data or b""),
+            len(group[0].ciphertext),
+        ),
+    )
 
 
 def accepted_batch(vector_set: AeadVectorSet, size: int) -> list[AeadVector]:

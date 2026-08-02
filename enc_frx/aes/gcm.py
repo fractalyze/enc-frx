@@ -125,8 +125,9 @@ class AesGcm:
         subkey = self._hash_subkey(schedule, key)
         counter = ctr.initial_counter(subkey, nonce)
 
-        ciphertext = ctr.encrypt(schedule, ctr.increment(counter), plaintext)
-        tag = self._tag(schedule, subkey, counter, associated_data, ciphertext)
+        mask, keystream = self._gctr(schedule, counter, plaintext.shape[-1])
+        ciphertext = plaintext ^ keystream
+        tag = self._tag(subkey, mask, associated_data, ciphertext)
         return fnp.concatenate([ciphertext, tag], axis=-1)
 
     def open(
@@ -150,18 +151,18 @@ class AesGcm:
         schedule = block.key_schedule(key)
         subkey = self._hash_subkey(schedule, key)
         counter = ctr.initial_counter(subkey, nonce)
+        mask, keystream = self._gctr(schedule, counter, body.shape[-1])
 
         # An arithmetic reduction over the whole tag, per batch entry. Never an
         # early exit and never a `lax.cond`: the comparison is on secret-derived
         # data, and in a batch a `cond` forces both sides anyway.
-        expected = self._tag(schedule, subkey, counter, associated_data, body)
+        expected = self._tag(subkey, mask, associated_data, body)
         accepted = fnp.all(expected == tag, axis=-1)
 
         # Computed before the verdict is known, because a traced batch computes
         # both — so the mask is the only thing keeping it from a caller who did
         # not read `ok`.
-        plaintext = ctr.encrypt(schedule, ctr.increment(counter), body)
-        return fnp.where(accepted[..., None], plaintext, 0), accepted
+        return fnp.where(accepted[..., None], body ^ keystream, 0), accepted
 
     def _checked(self, value: ArrayLike, size: int, name: str) -> Array:
         """Pin an argument's width to the instance's, at trace time.
@@ -183,46 +184,39 @@ class AesGcm:
         zeros = fnp.zeros((*key.shape[:-1], BLOCK_SIZE), dtype=fnp.uint8)
         return block.encrypt_with_schedule(schedule, zeros)
 
+    def _gctr(
+        self, schedule: list[Array], counter: Array, length: int
+    ) -> tuple[Array, Array]:
+        """§7.1's two `GCTR` invocations, which are one keystream.
+
+        `uint8 [B, 16]`, a static payload length -> the tag's mask `E_K(J_0)` and
+        `length` bytes of keystream from `inc32(J_0)`.
+
+        The standard writes them apart — step 3 encrypts the payload from
+        `inc32(J_0)`, step 6 masks the tag at `J_0` — but `GCTR_K(J_0, ·)` is one
+        counter sequence whose first block is the mask and whose rest is the
+        payload's. Generating them together is one AES invocation rather than
+        two, and it is why an empty payload costs exactly the one block it needs
+        rather than a discarded second.
+        """
+        blocks = -(-length // BLOCK_SIZE)
+        stream = ctr.keystream(schedule, counter, blocks + 1)
+        return stream[..., :BLOCK_SIZE], stream[..., BLOCK_SIZE : BLOCK_SIZE + length]
+
     def _tag(
         self,
-        schedule: list[Array],
         subkey: Array,
-        counter: Array,
+        mask: Array,
         associated_data: ArrayLike | None,
         ciphertext: Array,
     ) -> Array:
-        """§7.1 steps 5-6: `MSB_t(GHASH(H, ...) ⊕ E_K(J_0))`.
+        """§7.1 steps 5-6: `MSB_t(GHASH(H, A ‖ C ‖ lengths) ⊕ E_K(J_0))`.
 
         Step 6 is `GCTR_K(J_0, S)`, which over a single block is the XOR with
         `E_K(J_0)` written here — the counter does not advance within one block.
         """
-        digest = ghash.ghash(subkey, self._hash_blocks(associated_data, ciphertext))
-        mask = block.encrypt_with_schedule(schedule, counter)
+        digest = ghash.ghash(subkey, ghash.hash_input(associated_data, ciphertext))
         return (digest ^ mask)[..., : self.tag_size]
-
-    def _hash_blocks(
-        self, associated_data: ArrayLike | None, ciphertext: Array
-    ) -> Array:
-        """§7.1 step 5's input: `A ‖ 0^v ‖ C ‖ 0^u ‖ [len(A)]_64 ‖ [len(C)]_64`.
-
-        Both lengths are static, so the padding and the trailing block are
-        constant-shaped rather than anything derived from the data.
-        """
-        batch = ciphertext.shape[:-1]
-        parts = []
-        aad_length = 0
-        if associated_data is not None:
-            aad = fnp.asarray(associated_data, dtype=fnp.uint8)
-            aad_length = aad.shape[-1]
-            parts.append(ghash.pad_to_blocks(aad))
-        parts.append(ghash.pad_to_blocks(ciphertext))
-        parts.append(
-            fnp.broadcast_to(
-                ghash.length_block(aad_length, ciphertext.shape[-1]),
-                (*batch, 1, BLOCK_SIZE),
-            )
-        )
-        return fnp.concatenate(parts, axis=-2)
 
 
 if TYPE_CHECKING:

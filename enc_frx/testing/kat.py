@@ -522,7 +522,7 @@ _AEAD_TAMPERINGS: tuple[tuple[str, Callable[[AeadVector], AeadVector]], ...] = (
 def check_aead(scheme: Aead, vectors: Sequence[AeadVector]) -> None:
     """Run every check the standard requires, plus the tampering it does not."""
     check_aead_published(scheme, vectors)
-    for group in _group_aead_by_shape(vectors):
+    for group in group_aead_by_shape(vectors):
         _check_aead_tampering(scheme, [v for v in group if v.valid])
 
 
@@ -539,10 +539,16 @@ def check_aead_published(scheme: Aead, vectors: Sequence[AeadVector]) -> None:
 
     So a sweep runs this and a gate runs `check_aead`, and a scheme is not
     permitted to be gated by this alone: a set of positives cannot distinguish an
-    `open` that verifies from one that returns `ok = True`. CAVP's published
-    `FAIL` cases narrow that gap and do not close it — they are all corruption the
-    standard chose, none of them mixes a verdict inside one batch, and none of
-    them moves a nonce or an associated-data byte.
+    `open` that verifies from one that returns `ok = True`.
+
+    How much a published set narrows that gap depends on the set, and CAVP's GCM
+    vectors narrow it further than they might appear to. Their `FAIL` cases sit in
+    the same sections as their passing ones, so grouping by shape puts both in one
+    batch — which means this driver does check that exactly the failing entries of
+    a mixed batch come back masked. What it still cannot reach is the tampering
+    the standard never published: no CAVP case moves a nonce or an
+    associated-data byte, and none says *which* input was corrupted. Those are
+    `check_aead`'s, and they are why it is the gate.
     """
     if not vectors:
         raise KatError("no vectors: an empty set passes trivially and proves nothing")
@@ -550,7 +556,7 @@ def check_aead_published(scheme: Aead, vectors: Sequence[AeadVector]) -> None:
     _reject_unsupported(vectors)
     _one_parameter_set(vectors)
 
-    for group in _group_aead_by_shape(vectors):
+    for group in group_aead_by_shape(vectors):
         _check_seal(scheme, group)
         _check_open(scheme, group)
 
@@ -642,7 +648,7 @@ def _aead_args(group: Sequence[AeadVector]) -> tuple[Array, Array, Array | None]
     )
 
 
-def _group_aead_by_shape(vectors: Sequence[AeadVector]) -> list[list[AeadVector]]:
+def group_aead_by_shape(vectors: Sequence[AeadVector]) -> list[list[AeadVector]]:
     """Split into batches of equal byte lengths.
 
     A batch axis needs one static shape, and published sets deliberately vary
@@ -755,17 +761,11 @@ _CAVP_LENGTHS = ("Keylen", "IVlen", "PTlen", "AADlen", "Taglen")
 _CAVP_BYTE_FIELDS = ("Key", "IV", "PT", "AAD", "CT", "Tag")
 
 
-def _cavp_bytes(case: dict[str, str], name: str) -> bytes:
-    return bytes.fromhex(case.get(name, ""))
-
-
-def _cavp_case(
-    name: str, lengths: dict[str, int], case: dict[str, str], index: int
-) -> AeadVector:
+def _cavp_case(stem: str, lengths: dict[str, int], case: dict[str, str]) -> AeadVector:
     """One `Count = N` block, against the section lengths that govern it."""
     case_id = (
-        f"{name}/k{lengths['Keylen']}iv{lengths['IVlen']}tag{lengths['Taglen']}"
-        f"/pt{lengths['PTlen']}aad{lengths['AADlen']}/count{index}"
+        f"{stem}/k{lengths['Keylen']}iv{lengths['IVlen']}tag{lengths['Taglen']}"
+        f"/pt{lengths['PTlen']}aad{lengths['AADlen']}/count{case[_CAVP_COUNT]}"
     )
 
     ragged = {n: lengths[n] for n in _CAVP_LENGTHS if lengths[n] % 8}
@@ -777,27 +777,25 @@ def _cavp_case(
             f"encoding."
         )
 
-    fields = {name: _cavp_bytes(case, name) for name in _CAVP_BYTE_FIELDS}
+    fields = {field: bytes.fromhex(case.get(field, "")) for field in _CAVP_BYTE_FIELDS}
     failed = _CAVP_FAIL in case
-    for field, length in (
+    declared = [
         ("Key", "Keylen"),
         ("IV", "IVlen"),
         ("CT", "PTlen"),
         ("AAD", "AADlen"),
         ("Tag", "Taglen"),
-    ):
+    ]
+    # A rejected case publishes no plaintext, which is right rather than missing:
+    # there is nothing the standard expects an opener to produce.
+    if not failed:
+        declared.append(("PT", "PTlen"))
+    for field, length in declared:
         if len(fields[field]) * 8 != lengths[length]:
             raise KatError(
                 f"{case_id}: {field} is {len(fields[field])} bytes but the section "
                 f"declares {length} = {lengths[length]} bits"
             )
-    # A rejected case publishes no plaintext, which is right rather than missing:
-    # there is nothing the standard expects an opener to produce.
-    if not failed and len(fields["PT"]) * 8 != lengths["PTlen"]:
-        raise KatError(
-            f"{case_id}: PT is {len(fields['PT'])} bytes but the section declares "
-            f"PTlen = {lengths['PTlen']} bits"
-        )
 
     unsupported = tuple(
         sorted(set(case) - set(_CAVP_BYTE_FIELDS) - {_CAVP_COUNT, _CAVP_FAIL})
@@ -836,19 +834,13 @@ def load_cavp_gcm(path: Path | str) -> list[AeadVectorSet]:
     verdict, and an encrypt case is the same thing with the verdict `accept`. So
     the decrypt files gate `seal` too, GCM being deterministic.
     """
-    name = Path(path).stem
+    stem = Path(path).stem
     lengths: dict[str, int] = {}
-    sections: dict[tuple[int, int, int], list[AeadVector]] = {}
     case: dict[str, str] | None = None
-    index = 0
-
-    def flush() -> None:
-        nonlocal case
-        if case is None:
-            return
-        key = (lengths["Keylen"] // 8, lengths["IVlen"] // 8, lengths["Taglen"] // 8)
-        sections.setdefault(key, []).append(_cavp_case(name, lengths, case, index))
-        case = None
+    # Each entry pairs a case with the lengths in force when `Count` opened it.
+    # Snapshotting there rather than reading `lengths` afterwards is what keeps a
+    # later section header from retroactively regoverning a case already parsed.
+    parsed: list[tuple[dict[str, int], dict[str, str]]] = []
 
     for number, line in enumerate(Path(path).read_text().splitlines(), start=1):
         line = line.strip()
@@ -857,35 +849,45 @@ def load_cavp_gcm(path: Path | str) -> list[AeadVectorSet]:
 
         section = _CAVP_SECTION.match(line)
         if section:
-            flush()
-            length, value = section.group(1), section.group(2)
+            case = None
+            length, value = section.groups()
             if length not in _CAVP_LENGTHS:
-                raise KatError(f"{name}:{number}: unknown section parameter {length}")
+                raise KatError(f"{stem}:{number}: unknown section parameter {length}")
             lengths[length] = int(value)
             continue
 
         if line == _CAVP_FAIL:
             if case is None:
-                raise KatError(f"{name}:{number}: FAIL outside a case")
+                raise KatError(f"{stem}:{number}: FAIL outside a case")
             case[_CAVP_FAIL] = ""
             continue
 
-        field = _CAVP_FIELD.match(line)
-        if field is None:
-            raise KatError(f"{name}:{number}: cannot parse {line!r}")
-        key, value = field.group(1), field.group(2)
-        if key == _CAVP_COUNT:
-            flush()
-            case, index = {_CAVP_COUNT: value}, int(value)
+        matched = _CAVP_FIELD.match(line)
+        if matched is None:
+            raise KatError(f"{stem}:{number}: cannot parse {line!r}")
+        field, value = matched.groups()
+        if field == _CAVP_COUNT:
+            missing = [n for n in _CAVP_LENGTHS if n not in lengths]
+            if missing:
+                raise KatError(f"{stem}:{number}: case opened before {missing}")
+            case = {_CAVP_COUNT: value}
+            parsed.append((dict(lengths), case))
             continue
         if case is None:
-            raise KatError(f"{name}:{number}: {key} outside a case")
-        case[key] = value
+            raise KatError(f"{stem}:{number}: {field} outside a case")
+        case[field] = value
 
-    flush()
+    if not parsed:
+        raise KatError(f"{stem}: no cases; an empty set passes trivially")
 
-    if not sections:
-        raise KatError(f"{name}: no cases; an empty set passes trivially")
+    sections: dict[tuple[int, int, int], list[AeadVector]] = {}
+    for case_lengths, case_fields in parsed:
+        key = (
+            case_lengths["Keylen"] // 8,
+            case_lengths["IVlen"] // 8,
+            case_lengths["Taglen"] // 8,
+        )
+        sections.setdefault(key, []).append(_cavp_case(stem, case_lengths, case_fields))
     return [
         AeadVectorSet(
             key_size=key_size,

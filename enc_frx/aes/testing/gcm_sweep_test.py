@@ -8,11 +8,12 @@ that space with the tampering pass; this runs the whole space without it.
 
 The division is a cost decision, and the halves are not interchangeable.
 `check_aead` derives a tampered batch per entry of a batch, so it is quadratic in
-a group and a full set at that depth would take hours rather than minutes. What it
-sees that this cannot: a verdict mixed inside one batch, a moved nonce, a moved
-associated-data byte. What this sees that the gate cannot: the other 47000 cases.
-So `check_aead_published` is used here, and its docstring says plainly that a
-scheme gated on it alone would prove nothing about rejection.
+a group and a full set at that depth would take hours rather than minutes. What
+this sees that the gate cannot: the other 47000 cases. What the gate sees that
+this cannot is narrower than it sounds — CAVP's `FAIL` cases share sections with
+its passing ones, so grouping by shape mixes verdicts inside a batch here too,
+and what is left is only the tampering the standard never published: a moved
+nonce, a moved associated-data byte, and knowing *which* input was corrupted.
 
 The 32- and 64-bit tag sections are refused rather than run. They are SP 800-38D
 Appendix C's, admitted only under invocation and payload limits that live with the

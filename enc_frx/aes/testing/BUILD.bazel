@@ -93,6 +93,8 @@ py_library(
     deps = [
         "//enc_frx/testing:kat",
         "@rules_python//python/runfiles",
+        requirement("frx"),
+        requirement("numpy"),
     ],
 )
 

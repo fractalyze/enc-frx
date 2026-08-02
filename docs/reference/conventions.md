@@ -169,6 +169,11 @@ CAVP archive is published once and not regenerated — the sha256 carries that
 weight alone, so say so at the declaration rather than leaving the reader to
 wonder whether the pin was forgotten.
 
+An archive costs two things a loose file does not. It needs a `build_file_content`
+filegroup, since the fetched tree has no `BUILD` of its own; and its runfiles path
+is `<repo>/<name>` rather than the `<repo>/file/<name>` an `http_file` produces,
+which is the shape a test's `Rlocation` call has to ask for.
+
 ## Scheme doc skeleton
 
 Every page in [`../schemes/`](../schemes) answers three things, and everything
