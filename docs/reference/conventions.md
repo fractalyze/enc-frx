@@ -25,6 +25,25 @@ batch is one array and a `scan` over blocks would serialize the only source of
 parallelism. Poly1305 and GHASH are Horner chains: parallel across the batch,
 sequential within a message, and a `scan` on the block axis is correct.
 
+## Bit manipulation on a field goes through `view`
+
+`&`, `^`, `<<`, `>>` do not work on a binary-field array, and the rejection is a
+type error rather than a missing lowering: StableHLO's integer ops do not accept
+`!field.bf<...>`. That is the right outcome — those are not field operations. A
+shift by `k` already exists as a multiply by the field constant `x^k`, and
+masking has no meaning on a residue class at all.
+
+What is wanted in their place is access to the *representation*, and the
+primitive for that is a bitcast:
+
+```python
+data.view(zk_dtypes.binary_field_ghash)   # uint8 [..., 16] -> field [..., 1]
+element[..., None].view(fnp.uint8)        # field [...]     -> uint8 [..., 16]
+```
+
+Both lower to `bitcast_convert` and a reshape — no copy, no arithmetic. So do the
+bit work on the `uint8` side and cross with `view`.
+
 ## What belongs in hash-frx, and what belongs here
 
 `hash-frx` owns **unkeyed** primitives and the fusion marker seam. Its
@@ -151,6 +170,24 @@ the KATs; they never replace them.
 An exhaustive sweep — every parameter set against every published vector — is
 tagged `slow_kat`, which drops it from the per-PR run and keeps it in the
 scheduled one.
+
+### A vector is fetched, never transcribed
+
+Hex copied by hand is not a test vector. Fetch the standard's text or the
+published JSON and extract the values programmatically, and when a vector already
+in the tree turns out to disagree, **diff it against the source rather than
+replacing it** — the diff is what distinguishes one wrong byte from a dropped
+nibble that shifted everything after it.
+
+RFC hex dumps parse with `^\s*[0-9]{3}\s+((?:[0-9a-f]{2} ?)+?)\s{2,}`. A
+plaintext that is awkward to transcribe — non-ASCII, smart quotes — is a signal
+to extract it as hex, not to weaken the assertion to a round trip.
+
+The reason is not tidiness. When a hand-copied vector fails, nothing says whether
+the vector or the implementation is wrong, and that ambiguity costs more than the
+fetch. What resolves it cheaply is having a second gate that already passes: an
+implementation agreeing with an independent reference across hundreds of inputs
+is not wrong about one more published case.
 
 ### Vectors are fetched and pinned, never committed
 
