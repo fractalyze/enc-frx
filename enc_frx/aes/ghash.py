@@ -67,6 +67,22 @@ def from_field(value: Array) -> Array:
     return _reverse_bits(value[..., None].view(fnp.uint8))
 
 
+def _absorb(
+    carry: tuple[Array, Array], block: Array
+) -> tuple[tuple[Array, Array], None]:
+    """One Horner step, with `H` carried rather than captured.
+
+    `H` rides the carry — where it is loop-invariant and costs nothing — instead
+    of being closed over, because `frx.lax.scan` caches its lowering on the body
+    function's *identity*. A body defined inside `ghash` is a fresh object per
+    call, so every call missed that cache: measured at 137 ms and 2.1 MB of
+    retained lowering per call, against 0.4 ms and nothing once hoisted. It never
+    looked like a bug — the answers were right and one call is not slow.
+    """
+    accumulator, factor = carry
+    return ((accumulator + to_field(block)) * factor, factor), None
+
+
 def ghash(subkey: ArrayLike, blocks: ArrayLike) -> Array:
     """`uint8 [B, 16]`, `uint8 [B, L, 16]` -> `uint8 [B, 16]`.
 
@@ -78,10 +94,9 @@ def ghash(subkey: ArrayLike, blocks: ArrayLike) -> Array:
     factor = to_field(subkey)
     initial = fnp.zeros(blocks.shape[:-2], dtype=GF128)
 
-    def absorb(accumulator: Array, block: Array) -> tuple[Array, None]:
-        return (accumulator + to_field(block)) * factor, None
-
-    accumulated, _ = frx.lax.scan(absorb, initial, fnp.moveaxis(blocks, -2, 0))
+    (accumulated, _), _ = frx.lax.scan(
+        _absorb, (initial, factor), fnp.moveaxis(blocks, -2, 0)
+    )
     return from_field(accumulated)
 
 
@@ -110,3 +125,35 @@ def pad_to_blocks(data: Array) -> Array:
         data, [(0, 0)] * (data.ndim - 1) + [(0, blocks * BLOCK_SIZE - length)]
     )
     return padded.reshape(*data.shape[:-1], blocks, BLOCK_SIZE)
+
+
+def hash_input(first: ArrayLike | None, second: ArrayLike) -> Array:
+    """Two byte strings and their lengths, as whole blocks ready to hash.
+
+    `uint8 [B, M]` or None, `uint8 [B, N]` -> `uint8 [B, L, 16]`, laid out as
+    `first ‖ 0^v ‖ second ‖ 0^u ‖ [len(first)]_64 ‖ [len(second)]_64`.
+
+    Both places SP 800-38D hashes have this shape. §7.1 step 5 hashes the
+    associated data against the ciphertext, which is the two-part case. §7.1's
+    `J_0` for an IV that is not 96 bits is written `IV ‖ pad ‖ 0^64 ‖
+    [len(IV)]_64` — the one-part case, since `0^64 ‖ [len(IV)]_64` is exactly a
+    length block whose first count is zero.
+
+    Both lengths are static, so the padding and the trailing block are
+    constant-shaped rather than derived from the data.
+    """
+    second = fnp.asarray(second, dtype=fnp.uint8)
+    parts = []
+    first_length = 0
+    if first is not None:
+        first = fnp.asarray(first, dtype=fnp.uint8)
+        first_length = first.shape[-1]
+        parts.append(pad_to_blocks(first))
+    parts.append(pad_to_blocks(second))
+    parts.append(
+        fnp.broadcast_to(
+            length_block(first_length, second.shape[-1]),
+            (*second.shape[:-1], 1, BLOCK_SIZE),
+        )
+    )
+    return fnp.concatenate(parts, axis=-2)

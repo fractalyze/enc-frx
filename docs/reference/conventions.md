@@ -191,16 +191,25 @@ is not wrong about one more published case.
 
 ### Vectors are fetched and pinned, never committed
 
-A vector set is declared as an `http_file` in [`MODULE.bazel`](../../MODULE.bazel)
-with a sha256 and a URL pinned to a specific upstream commit, and reaches a test
-through `data`. The published sets run to tens of megabytes, and committing them
-taxes every clone forever for data that never changes after publication. The
-sha256 means a swapped or truncated fetch fails the build rather than silently
-changing what a scheme is gated on, and the repository cache makes every build
-after the first offline.
+A vector set is declared in [`MODULE.bazel`](../../MODULE.bazel) with a sha256 and
+reaches a test through `data` — `http_file` for a set published as loose files,
+`http_archive` for one published as an archive, as CAVP's are. The published sets
+run to tens of megabytes, and committing them taxes every clone forever for data
+that never changes after publication. The sha256 means a swapped or truncated
+fetch fails the build rather than silently changing what a scheme is gated on, and
+the repository cache makes every build after the first offline.
 
-Pin the URL to a commit, never a branch: NIST regenerates these files in place,
-and a moving URL turns an upstream regeneration into a mystery failure here.
+Where the source is a git tree, pin the URL to a commit and never a branch: NIST
+regenerates ACVP's files in place, and a moving URL turns an upstream
+regeneration into a mystery failure here. Where there is no commit to pin — a
+CAVP archive is published once and not regenerated — the sha256 carries that
+weight alone, so say so at the declaration rather than leaving the reader to
+wonder whether the pin was forgotten.
+
+An archive costs two things a loose file does not. It needs a `build_file_content`
+filegroup, since the fetched tree has no `BUILD` of its own; and its runfiles path
+is `<repo>/<name>` rather than the `<repo>/file/<name>` an `http_file` produces,
+which is the shape a test's `Rlocation` call has to ask for.
 
 ## Scheme doc skeleton
 
