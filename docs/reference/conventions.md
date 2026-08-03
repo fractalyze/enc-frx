@@ -79,6 +79,48 @@ layout whose margin rests on that bound is gated by a **differential test agains
 Python's arbitrary-precision integers**, over extreme inputs as well as random
 ones — a published vector set never approaches the worst case.
 
+## The lattice NTT is per-repo, and the shape is the shared part
+
+ML-KEM's NTT lives here; ML-DSA's lives in
+[`sig-frx`](https://github.com/fractalyze/sig-frx). They are deliberately not
+shared, and the reason is not that sharing would be hard — it is that the two
+transforms disagree about the things a shared implementation would have to hold
+fixed.
+
+| | ML-KEM (FIPS 203) | ML-DSA (FIPS 204) |
+| --- | --- | --- |
+| modulus | 3329 (12-bit) | 8380417 (23-bit) |
+| depth | 7 layers, **incomplete** | 8 layers, complete |
+| base case | degree-1 products mod `X² − ζ` | pointwise |
+| worst-case product | 2^24 — fits a lane | 2^46 — **does not** |
+
+The last row decides it, and it follows from the section above. A product of two
+ML-KEM residues is at most 11075584 and computes exactly in a 32-bit lane; a
+product of two ML-DSA residues is about 7·10^13, which a lane neither holds nor
+complains about — it returns a wrong number. So ML-DSA needs a split
+representation that ML-KEM does not, and an NTT "parameterized over the modulus"
+would be parameterizing the representation of a field element rather than a
+constant.
+
+The incomplete transform says the same thing about the algorithm rather than the
+arithmetic: ML-KEM stops one layer early and its base case multiplies degree-1
+polynomials, so that step is different code, not a different constant.
+
+What is genuinely common is the layer-walk skeleton — a few dozen lines, which is
+not enough to carry a cross-repo pin. `hash-frx` is the wrong home for it in any
+case, being the *symmetric* layer: a lattice NTT is not a hash and does not belong
+there merely because both repos already depend on it.
+
+So each repo implements its own, and the convention is that the two **look
+alike**: same module layout, the same names (`ntt`, `intt`, `base_mul`,
+`montgomery_reduce`), the same twiddle-table generation style. The cost being
+avoided is not duplicated lines — it is two implementations that look unrelated,
+so a bug fixed in one is never looked for in the other. Whoever writes the second
+should be able to read the first.
+
+Revisit when a third lattice scheme appears. Two implementations are not evidence
+for an abstraction; three usually are.
+
 ## Failure is a value, and the two seams disagree on purpose
 
 Nothing here raises. A traced batch has no exception that means "entry 7 failed",
