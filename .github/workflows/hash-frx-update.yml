@@ -10,6 +10,13 @@
 # dispatch is a second trigger for this job instead, so a new frx build is
 # picked up in minutes rather than at the next poll. hash-frx publishes no wheel
 # and dispatches nothing, so the schedule is the baseline.
+#
+# One branch, force-pushed in place, as sig-frx's copy of this workflow does.
+# Naming the branch after the upstream commit left one open PR per upstream
+# commit — each obsolete as soon as the next appeared, and each conflicting with
+# the others, since they all move the same pin lines. Re-cutting one branch from
+# the checked-out main gives the newest pin on the newest base and nothing to
+# resolve.
 
 name: hash-frx Update
 
@@ -68,13 +75,10 @@ jobs:
             exit 0
           fi
 
-          branch="bump/hash-frx-${upstream:0:12}"
-          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
-            echo "a bump PR for ${upstream:0:12} is already open"
-            exit 0
-          fi
-
-          git checkout -b "${branch}"
+          # One branch for every bump, re-cut from the checked-out main so the
+          # PR carries the newest pins on top of the newest base.
+          branch="bump/hash-frx"
+          git checkout -B "${branch}"
 
           body_pins=""
           if [ "${pinned}" != "${upstream}" ]; then
@@ -95,14 +99,25 @@ jobs:
           git config user.email 'fractalyze-dev@users.noreply.github.com'
           git add MODULE.bazel MODULE.bazel.lock requirements.in requirements_lock_3_11.txt
           git commit -m "build(deps): sync to hash-frx ${upstream:0:12}"
-          git push -u origin "${branch}"
+          git push --force origin "${branch}"
 
-          gh pr create --base main --head "${branch}" \
-            --title "build(deps): sync to hash-frx ${upstream:0:12}" \
-            --body "$(printf '%s\n' \
-              "${body_pins}" \
-              "Compare: https://github.com/fractalyze/hash-frx/compare/${pinned}...${upstream}" \
-              "" \
-              "The two pins move together on purpose: hash-frx resolves frx from its own lock, so a lone bump on either side puts two frx copies on one test's \`sys.path\`." \
-              "" \
-              "CI is the review: the dependency guard exercises a real hash-frx computation across the pin, so a break in the layer below fails here rather than inside a scheme.")"
+          title="build(deps): sync to hash-frx ${upstream:0:12}"
+          body=$(printf '%s\n' \
+            "${body_pins}" \
+            "Compare: https://github.com/fractalyze/hash-frx/compare/${pinned}...${upstream}" \
+            "" \
+            "The two pins move together on purpose: hash-frx resolves frx from its own lock, so a lone bump on either side puts two frx copies on one test's \`sys.path\`." \
+            "" \
+            "CI is the review: the dependency guard exercises a real hash-frx computation across the pin, so a break in the layer below fails here rather than inside a scheme." \
+            "" \
+            "Force-pushed in place as hash-frx moves, so this PR always carries the newest pins on the newest main.")
+
+          # A force-push moves an open PR's head but leaves its title and body
+          # untouched, and both name the pin.
+          existing=$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')
+          if [ -n "${existing}" ]; then
+            echo "refreshing PR #${existing} for ${upstream:0:12}"
+            gh pr edit "${existing}" --title "${title}" --body "${body}"
+          else
+            gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"
+          fi
