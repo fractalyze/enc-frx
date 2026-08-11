@@ -18,10 +18,16 @@
 # and `binary_field_ghash` (GF(2^128), GCM's) — and those dtypes register in the
 # frx frontend from zk_dtypes >= 0.0.10. Taken transitively, a frx bump could
 # drop the thing AES-GCM is built on without anything here saying so.
+#
+# The floor is 0.0.13 for a second reason since ML-KEM: `zk_dtypes.prime_field`,
+# the factory that mints a field from a runtime modulus, does not exist before
+# it. ML-KEM's q = 3329 is not one of the curated families, so the NTT has no
+# dtype to run on without it — the failure is an AttributeError at import, not a
+# wrong result. Held at 0.0.14, the release this repo has been tested against.
 absl-py
 numpy
-frx==0.10.1.dev20260810011544
-frxlib==0.10.1.dev20260810011544
-frx-cuda12-pjrt==0.10.1.dev20260810011544
-frx-cuda12-plugin==0.10.1.dev20260810011544
-zk-dtypes==0.0.10
+frx==0.10.1.dev20260811213301
+frxlib==0.10.1.dev20260811213301
+frx-cuda12-pjrt==0.10.1.dev20260811213301
+frx-cuda12-plugin==0.10.1.dev20260811213301
+zk-dtypes==0.0.14
