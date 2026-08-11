@@ -20,8 +20,8 @@
 # drop the thing AES-GCM is built on without anything here saying so.
 absl-py
 numpy
-frx==0.10.1.dev20260731104240
-frxlib==0.10.1.dev20260731104240
-frx-cuda12-pjrt==0.10.1.dev20260731104240
-frx-cuda12-plugin==0.10.1.dev20260731104240
+frx==0.10.1.dev20260810011544
+frxlib==0.10.1.dev20260810011544
+frx-cuda12-pjrt==0.10.1.dev20260810011544
+frx-cuda12-plugin==0.10.1.dev20260810011544
 zk-dtypes==0.0.10
