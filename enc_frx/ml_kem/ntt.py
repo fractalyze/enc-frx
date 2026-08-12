@@ -85,11 +85,29 @@ def as_ints(poly: Array) -> Array:
     return fnp.asarray(poly).astype(np.int32) % Q
 
 
-def _half_transform(x: Array, *, inverse: bool) -> Array:
+def _transform_halves(halves: Array, *, inverse: bool) -> Array:
+    """Both halves in one opcode call — they are two entries of its batch axis.
+
+    The opcode transforms the minor dimension and treats everything ahead of it
+    as a batch, so `[..., 2, 128]` is one call rather than two. Splitting it
+    would double the op count on the hottest data in the scheme for no gain:
+    the two halves share a root table and never interact.
+    """
     ntt_type = (
         frx.lax.NttType.NEGACYCLIC_INTT if inverse else frx.lax.NttType.NEGACYCLIC_NTT
     )
-    return frx.lax.ntt(x, ntt_type=ntt_type, generator=_GENERATOR)
+    return frx.lax.ntt(halves, ntt_type=ntt_type, generator=_GENERATOR)
+
+
+def _split_halves(f: Array) -> Array:
+    """`[..., 256] -> [..., 2, 128]`, even coefficients first.
+
+    A reshape and a transpose rather than two strided slices and a stack: the
+    pairs `(f[2i], f[2i+1])` are already adjacent, so the de-interleave is a
+    view of the same buffer.
+    """
+    paired = f.reshape(*f.shape[:-1], _HALF, 2)
+    return fnp.swapaxes(paired, -1, -2)
 
 
 def ntt(f: Array) -> Array:
@@ -98,9 +116,11 @@ def ntt(f: Array) -> Array:
     Byte-identical to the standard, not merely a valid transform — see the
     module docstring for the two things that makes true.
     """
-    even = _half_transform(f[..., 0::2], inverse=False)
-    odd = _half_transform(f[..., 1::2], inverse=False)
-    return _interleave(even[..., _BIT_REV7], odd[..., _BIT_REV7])
+    transformed = _transform_halves(_split_halves(f), inverse=False)
+    return _interleave(
+        transformed[..., 0, :][..., _BIT_REV7],
+        transformed[..., 1, :][..., _BIT_REV7],
+    )
 
 
 def intt(f_hat: Array) -> Array:
@@ -109,11 +129,13 @@ def intt(f_hat: Array) -> Array:
     The scale rides in the opcode's inverse direction — a length-128 transform
     normalizes by its own length, which is the 128 the standard applies.
     """
-    even = f_hat[..., 0::2][..., _BIT_REV7]
-    odd = f_hat[..., 1::2][..., _BIT_REV7]
-    return _interleave(
-        _half_transform(even, inverse=True), _half_transform(odd, inverse=True)
+    paired = _split_halves(f_hat)
+    halves = fnp.stack(
+        [paired[..., 0, :][..., _BIT_REV7], paired[..., 1, :][..., _BIT_REV7]],
+        axis=-2,
     )
+    transformed = _transform_halves(halves, inverse=True)
+    return _interleave(transformed[..., 0, :], transformed[..., 1, :])
 
 
 def base_mul(f_hat: Array, g_hat: Array) -> Array:
