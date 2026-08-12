@@ -72,3 +72,26 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# The one target in this package that is not public, and the visibility is the
+# enforcement rather than a convention: K-PKE is IND-CPA, so a consumer that
+# reached it would hold a primitive that is malleable and broken under the
+# chosen-ciphertext attack the FO transform exists to stop. Only ML-KEM itself
+# and this package's tests may depend on it.
+py_library(
+    name = "k_pke",
+    srcs = [
+        "__init__.py",
+        "k_pke.py",
+    ],
+    visibility = ["//enc_frx/ml_kem:__subpackages__"],
+    deps = [
+        ":encoding",
+        ":hashes",
+        ":ntt",
+        ":params",
+        ":sampling",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

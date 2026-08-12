@@ -3,7 +3,15 @@
 
 Why these sets rather than ACVP's, and why all three parameter sets, is stated
 once where they are pinned: [`//MODULE.bazel`](../../../MODULE.bazel). This
-module is the parser.
+module finds them in runfiles and parses them, so a test asks for a parameter set
+and never for a path.
+
+**The `intermediate/` files are FIPS 203 *draft*-era in one place.** They expand
+`(ρ, σ) ← G(d)`, where the final standard's Algorithm 13 line 1 is `G(d ‖ k)`.
+Everything the files publish from `ρ` and `σ` onward matches the final standard —
+including the `SampleNTT` index order, which they already carry the erratum for —
+so they gate every step except that one. A caller that starts from `d` is
+comparing against the draft; see `k_pke_test.py` for what covers the gap.
 
 The file format is ` = `-separated, and **a line is not a pair.** The first
 segment is the name and every later one is another way of writing the same
@@ -26,9 +34,12 @@ TEST ONLY.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+
+from python.runfiles import runfiles
 
 _HEX = re.compile(r"\A[0-9a-f]+\Z")
 _LIST = re.compile(r"\A\{(.*)\}\Z")
@@ -71,7 +82,35 @@ class Intermediate:
         return found[0]
 
 
-def load_intermediate(path: str) -> Intermediate:
+def _path(kind: str, parameter_set: str) -> str:
+    """A CCTV vector file in runfiles: both sets name theirs by parameter set."""
+    bits = parameter_set.split("-")[-1]
+    location = runfiles.Create().Rlocation(
+        f"cctv_ml_kem_{kind}_{bits}/file/ML-KEM-{bits}.txt"
+    )
+    assert location is not None, f"cctv_ml_kem_{kind}_{bits} not in runfiles"
+    return location
+
+
+@functools.lru_cache(maxsize=None)
+def intermediate(parameter_set: str) -> Intermediate:
+    """The `intermediate/` file for a parameter set. Cached: parsing is pure and
+    a test class reads the same file once per method."""
+    return _load_intermediate(_path("intermediate", parameter_set))
+
+
+@functools.lru_cache(maxsize=None)
+def unlucky_seeds(parameter_set: str) -> tuple[bytes, ...]:
+    """The `unluckysample/` seeds for a parameter set.
+
+    A tuple rather than the parser's list because the value is shared across
+    callers once cached, and a mutable one could be edited out from under the
+    next reader.
+    """
+    return tuple(_load_unlucky_seeds(_path("unlucky", parameter_set)))
+
+
+def _load_intermediate(path: str) -> Intermediate:
     values: dict[str, list[list[str]]] = defaultdict(list)
     with open(path, encoding="utf-8") as handle:
         for number, line in enumerate(handle, start=1):
@@ -87,12 +126,12 @@ def load_intermediate(path: str) -> Intermediate:
     return Intermediate(dict(values))
 
 
-def load_unlucky_seeds(path: str) -> list[bytes]:
+def _load_unlucky_seeds(path: str) -> list[bytes]:
     """The `d` seeds from an `unluckysample/` file.
 
     `d` alone, because that is what the sampler needs: `rho` is the first half of
-    `G(d)`, and everything else in the file is downstream of a full key
-    generation this cannot yet run.
+    `G(d)` in these files, and everything else in them is downstream of a whole
+    key generation.
     """
     seeds = [
         bytes.fromhex(line.split(" = ", 1)[1].strip())

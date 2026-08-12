@@ -42,6 +42,10 @@ py_test(
 
 # C2SP's CCTV vectors: the intermediate values that pin each sampler on its own,
 # and the unlucky seeds that pin the XOF budget.
+#
+# The files ride on this target rather than on each test, because this is what
+# knows their names — a consumer asks for a parameter set. A test that added an
+# accessor and forgot a `data` entry would fail on a missing runfile instead.
 py_library(
     name = "cctv_vectors",
     testonly = True,
@@ -49,13 +53,6 @@ py_library(
         "__init__.py",
         "cctv_vectors.py",
     ],
-    visibility = ["//enc_frx:__subpackages__"],
-)
-
-py_test(
-    name = "sampling_test",
-    size = "medium",
-    srcs = ["sampling_test.py"],
     data = [
         "@cctv_ml_kem_intermediate_1024//file",
         "@cctv_ml_kem_intermediate_512//file",
@@ -64,6 +61,14 @@ py_test(
         "@cctv_ml_kem_unlucky_512//file",
         "@cctv_ml_kem_unlucky_768//file",
     ],
+    visibility = ["//enc_frx:__subpackages__"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+py_test(
+    name = "sampling_test",
+    size = "medium",
+    srcs = ["sampling_test.py"],
     deps = [
         ":cctv_vectors",
         ":fips203_reference",
@@ -72,7 +77,24 @@ py_test(
         "//enc_frx/ml_kem:ntt",
         "//enc_frx/ml_kem:params",
         "//enc_frx/ml_kem:sampling",
-        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# K-PKE assembled: the published intermediate values at every stage, and the
+# round trips that cover the space between the three points they pin.
+py_test(
+    name = "k_pke_test",
+    size = "medium",
+    srcs = ["k_pke_test.py"],
+    deps = [
+        ":cctv_vectors",
+        "//enc_frx/ml_kem:encoding",
+        "//enc_frx/ml_kem:k_pke",
+        "//enc_frx/ml_kem:ntt",
+        "//enc_frx/ml_kem:params",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),
