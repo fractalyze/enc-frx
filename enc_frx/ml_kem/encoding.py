@@ -32,14 +32,38 @@ import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
 
-Q = 3329
-N = 256
+from enc_frx.ml_kem.params import (
+    POLY_BYTES,
+    SEED_SIZE,
+    N,
+    Q,
+    ciphertext_size,
+    decapsulation_key_size,
+    encapsulation_key_size,
+)
 
 # The widths FIPS 203 encodes at: 1 for the message, 4/5/10/11 for ciphertext
-# compression, 12 for uncompressed coefficients.
+# compression, 12 for uncompressed coefficients. `Compress_d` is defined only
+# for d < 12 — `compress(x, 12)` wraps rather than being the identity.
 WIDTHS = (1, 4, 5, 10, 11, 12)
 
-SEED_SIZE = 32
+
+def _checked_length(value: ArrayLike, size: int, name: str) -> Array:
+    """Pin a byte string's length at trace time, mirroring `AesGcm._checked`.
+
+    The type check of FIPS 203 §7.2/§7.3 is normative and sits at a different
+    altitude from the modulus check below it: a length is static in a traced
+    program, so it is an exception, while a coefficient's range is data and so
+    is a value.
+
+    Skipping it is not a missing niceness. A `dk` short by 40 bytes used to
+    decode to a **zero-length** `z` — the implicit-rejection seed — so the
+    rejection secret would have been derived from nothing, silently.
+    """
+    array = fnp.asarray(value).astype(np.uint8)
+    if array.shape[-1] != size:
+        raise ValueError(f"{name} is {size} bytes, got {array.shape[-1]}")
+    return array
 
 
 def _as_int(x: ArrayLike) -> Array:
@@ -131,10 +155,10 @@ def encode_ek(t_hat: ArrayLike, rho: ArrayLike) -> Array:
 
 
 def decode_ek(ek: ArrayLike, k: int) -> tuple[Array, Array]:
-    """Inverse of `encode_ek`, returning `(t̂, ρ)`."""
-    e = fnp.asarray(ek)
-    split = 384 * k
-    return decode_vector(e[..., :split], 12, k), e[..., split:].astype(np.uint8)
+    """Inverse of `encode_ek`, returning `(t̂, ρ)`. Length-checked, §7.2."""
+    e = _checked_length(ek, encapsulation_key_size(k), "an encapsulation key")
+    split = POLY_BYTES * k
+    return decode_vector(e[..., :split], 12, k), e[..., split:]
 
 
 def encode_ciphertext(u: ArrayLike, v: ArrayLike, du: int, dv: int) -> Array:
@@ -150,7 +174,7 @@ def encode_ciphertext(u: ArrayLike, v: ArrayLike, du: int, dv: int) -> Array:
 
 def decode_ciphertext(c: ArrayLike, k: int, du: int, dv: int) -> tuple[Array, Array]:
     """Inverse of `encode_ciphertext`, decompressed back to `Z_q`."""
-    ci = fnp.asarray(c)
+    ci = _checked_length(c, ciphertext_size(k, du, dv), "a ciphertext")
     split = 32 * du * k
     return (
         decompress(decode_vector(ci[..., :split], du, k), du),
@@ -161,8 +185,11 @@ def decode_ciphertext(c: ArrayLike, k: int, du: int, dv: int) -> tuple[Array, Ar
 def encode_dk(dk_pke: ArrayLike, ek: ArrayLike, h_ek: ArrayLike, z: ArrayLike) -> Array:
     """`dk_PKE ‖ ek ‖ H(ek) ‖ z`, FIPS 203 §7.3.
 
-    Takes `H(ek)` rather than computing it: the hash is the sampling layer's
-    (#19), and this module depends on nothing outside the repo.
+    `h_ek` is `H(ek)` — SHA3-256, 32 bytes, §4.1 — taken as an argument rather
+    than computed, so this module keeps depending on nothing outside `frx` and
+    `numpy`; the hash belongs to the sampling layer. Named explicitly because
+    unchecked bytes of the right length could equally be `G`, and a positive
+    round trip would not notice.
     """
     return fnp.concatenate(
         [fnp.asarray(x).astype(np.uint8) for x in (dk_pke, ek, h_ek, z)], axis=-1
@@ -171,14 +198,19 @@ def encode_dk(dk_pke: ArrayLike, ek: ArrayLike, h_ek: ArrayLike, z: ArrayLike) -
 
 def decode_dk(dk: ArrayLike, k: int) -> tuple[Array, Array, Array, Array]:
     """Inverse of `encode_dk`, splitting at the four fixed offsets."""
-    d = fnp.asarray(dk)
-    a = 384 * k
-    b = a + (384 * k + SEED_SIZE)
-    c = b + SEED_SIZE
-    return d[..., :a], d[..., a:b], d[..., b:c], d[..., c:]
+    parts = _checked_length(dk, decapsulation_key_size(k), "a decapsulation key")
+    pke_end = POLY_BYTES * k
+    ek_end = pke_end + encapsulation_key_size(k)
+    hash_end = ek_end + SEED_SIZE
+    return (
+        parts[..., :pke_end],
+        parts[..., pke_end:ek_end],
+        parts[..., ek_end:hash_end],
+        parts[..., hash_end:],
+    )
 
 
-def coefficients_are_reduced(b: ArrayLike, d: int = 12) -> Array:
+def coefficients_are_reduced(b: ArrayLike) -> Array:
     """The modulus check of FIPS 203 §7.2, as a per-entry boolean.
 
     `ByteEncode_12(ByteDecode_12(x)) == x` holds exactly when every coefficient
@@ -186,9 +218,12 @@ def coefficients_are_reduced(b: ArrayLike, d: int = 12) -> Array:
     12-bit value of 3329 or more fail to round-trip. Normative, and a malformed
     key that skips it is a documented attack surface.
 
+    Only meaningful at d = 12, so the width is not a parameter: below it
+    `byte_decode` reduces mod `2^d` and re-encoding always reproduces the input,
+    making the check a constant `True`.
+
     A value rather than an exception because the batch axis has no way to raise
     for entry 7 alone.
     """
     bi = fnp.asarray(b).astype(np.uint8)
-    coeffs = byte_decode(bi, d)
-    return (byte_encode(coeffs, d) == bi).all(axis=-1)
+    return (byte_encode(byte_decode(bi, 12), 12) == bi).all(axis=-1)

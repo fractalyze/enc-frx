@@ -48,9 +48,7 @@ import zk_dtypes
 from frx import Array
 from frx.typing import ArrayLike
 
-Q = 3329
-N = 256
-ZETA = 17
+from enc_frx.ml_kem.params import ZETA, N, Q
 
 # Coefficients live in the field rather than in integer lanes, so every product
 # is reduced by the dtype and the 16-bit-lane question never arises.
