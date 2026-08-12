@@ -29,6 +29,15 @@ SEED_SIZE = 32
 POLY_BYTES = 32 * 12
 
 
+def decryption_key_size(k: int) -> int:
+    """`ByteEncode_12(ŝ)` — K-PKE's `dk_PKE`, §5.1.
+
+    Distinct from `decapsulation_key_size` below, which is ML-KEM's `dk` and
+    carries this as its first field. K-PKE decrypts with the secret vector alone.
+    """
+    return POLY_BYTES * k
+
+
 def encapsulation_key_size(k: int) -> int:
     """`ByteEncode_12(t̂) ‖ ρ`, §7.1."""
     return POLY_BYTES * k + SEED_SIZE
@@ -36,7 +45,7 @@ def encapsulation_key_size(k: int) -> int:
 
 def decapsulation_key_size(k: int) -> int:
     """`dk_PKE ‖ ek ‖ H(ek) ‖ z`, §7.3."""
-    return POLY_BYTES * k + encapsulation_key_size(k) + 2 * SEED_SIZE
+    return decryption_key_size(k) + encapsulation_key_size(k) + 2 * SEED_SIZE
 
 
 def ciphertext_size(k: int, du: int, dv: int) -> int:

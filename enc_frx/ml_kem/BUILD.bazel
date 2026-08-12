@@ -73,11 +73,9 @@ py_library(
     ],
 )
 
-# The one target in this package that is not public, and the visibility is the
-# enforcement rather than a convention: K-PKE is IND-CPA, so a consumer that
-# reached it would hold a primitive that is malleable and broken under the
-# chosen-ciphertext attack the FO transform exists to stop. Only ML-KEM itself
-# and this package's tests may depend on it.
+# Not public: K-PKE is IND-CPA only, so only ML-KEM itself and this package's
+# tests may depend on it. What that does and does not fence is in `k_pke.py`'s
+# module docstring.
 py_library(
     name = "k_pke",
     srcs = [

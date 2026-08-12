@@ -19,25 +19,28 @@ the re-encryption check never match, so `decaps` would answer every ciphertext,
 valid ones included, with the implicit-rejection secret. That failure raises
 nothing and passes every round trip: both sides still agree with themselves.
 
-**Not exported, and not reachable outside `//enc_frx/ml_kem`.** K-PKE is IND-CPA
-and nothing more — its ciphertexts are malleable, and the chosen-ciphertext
-attack that breaks it is exactly what the FO transform exists to prevent. The
-build target's visibility is what holds that, rather than a naming convention;
-see `BUILD.bazel`.
+**No Bazel target outside `//enc_frx/ml_kem` may depend on this.** K-PKE is
+IND-CPA and nothing more — its ciphertexts are malleable, and the
+chosen-ciphertext attack that breaks it is exactly what the FO transform exists
+to prevent, so the build target is the one in this package that is not public.
+
+That fences the build graph, and only the build graph. The module ships in the
+wheel like every other, so a determined `import enc_frx.ml_kem.k_pke` still
+reaches it; what the visibility buys is that no target here acquires the
+dependency by accident, and that adding one is a review-visible edit.
 
 ## Where the batch axis is
 
-Everything is leading-axis, so a batch of `B` is one traced computation. The
-matrix-vector products are the part with a shape argument worth naming: `Â ∘ ŝ`
-is one `base_mul` over a broadcast pair and one sum over the column axis,
-whatever `k` is, rather than a Python loop over the rows.
+Everything is leading-axis, so a batch of `B` is one traced computation. See
+`_matrix_vector` for the shape argument that makes the products `k`-independent.
 
-## Two internals the published vectors have to reach
+## Two internals with their own entry points
 
-`_key_pair` and `_noisy_message` are split out because the values on either side
-of them are the ones a test cannot otherwise gate, not because the algorithms
-divide there. Each says why at its own docstring; both are exercised directly by
-`testing/k_pke_test.py`.
+`_key_pair` and `_noisy_message` are the algorithms' own step boundaries —
+Algorithm 13 line 1 against the rest, and Algorithm 15 line 5 against line 6.
+The published intermediate values land on those boundaries because that is where
+the standard names its quantities, which is also why the tests enter there. Each
+docstring says what its boundary is worth; neither exists only for a test.
 
 ## The parameters arrive per call
 
@@ -55,7 +58,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from enc_frx.ml_kem import encoding, hashes, ntt, sampling
-from enc_frx.ml_kem.params import POLY_BYTES, SEED_SIZE
+from enc_frx.ml_kem.params import SEED_SIZE, decryption_key_size
 
 
 def _inner_product(a_hat: Array, b_hat: Array) -> Array:
@@ -84,10 +87,8 @@ def key_gen(d: ArrayLike, *, k: int, eta1: int) -> tuple[Array, Array]:
     known-answer tests reproduce published key bytes from a published seed.
     """
     seed = encoding.checked_length(d, SEED_SIZE, "a K-PKE key generation seed")
-    # `(ρ, σ) ← G(d ‖ k)`, Algorithm 13 line 1. The parameter-set byte binds a
-    # key to the `k` it was generated under, and it is the one line here the
-    # FIPS 203 draft did not have — so every vector set published before the
-    # final standard expands `G(d)` instead and cannot see this byte at all.
+    # `(ρ, σ) ← G(d ‖ k)`, Algorithm 13 line 1: the parameter-set byte binds a
+    # key to the `k` it was generated under.
     k_byte = fnp.full((*seed.shape[:-1], 1), k, dtype=fnp.uint8)
     rho, sigma = hashes.g(fnp.concatenate([seed, k_byte], axis=-1))
     return _key_pair(rho, sigma, k=k, eta1=eta1)
@@ -96,20 +97,22 @@ def key_gen(d: ArrayLike, *, k: int, eta1: int) -> tuple[Array, Array]:
 def _key_pair(rho: Array, sigma: Array, *, k: int, eta1: int) -> tuple[Array, Array]:
     """Algorithm 13 from the expanded seeds onward — everything but line 1.
 
-    Split there because that is where the published intermediate values start.
-    They list `ρ` and `σ` as inputs and predate the `d ‖ k` amendment above, so a
-    test entering at `d` would gate the seed expansion and the lattice work only
-    against each other. Entering here gates the lattice work against the vectors
-    and leaves the expansion to a check of its own.
+    Its own entry point because the published intermediate values begin at `ρ`
+    and `σ`, and the sets in this tree predate the `d ‖ k` amendment above and so
+    cannot gate it. Splitting here lets the vectors gate the lattice work and
+    leaves the expansion to a check of its own — see `docs/schemes/ml-kem.md`.
     """
     a_hat = sampling.expand_matrix(rho, k)
     # `s` takes nonces 0..k-1 and `e` takes k..2k-1, both at `eta1` and both from
-    # `sigma` (Algorithm 13 lines 8-17), so one PRF call covers both vectors.
-    noise = sampling.sample_poly_cbd(
-        hashes.prf(eta1, sigma[..., None, :], np.arange(2 * k, dtype=np.uint8)), eta1
+    # `sigma` (Algorithm 13 lines 8-17), so one PRF call covers both vectors —
+    # and one transform too, since `ntt` is batch-first over the leading axes.
+    noise = ntt.ntt(
+        sampling.sample_poly_cbd(
+            hashes.prf(eta1, sigma[..., None, :], np.arange(2 * k, dtype=np.uint8)),
+            eta1,
+        )
     )
-    s_hat = ntt.ntt(noise[..., :k, :])
-    e_hat = ntt.ntt(noise[..., k:, :])
+    s_hat, e_hat = noise[..., :k, :], noise[..., k:, :]
     t_hat = _matrix_vector(a_hat, s_hat) + e_hat
     return (
         encoding.encode_ek(ntt.as_ints(t_hat), rho),
@@ -191,7 +194,9 @@ def _noisy_message(
     u, v = encoding.decode_ciphertext(c, k, du, dv)
     s_hat = ntt.as_field(
         encoding.decode_vector(
-            encoding.checked_length(dk_pke, POLY_BYTES * k, "a K-PKE decryption key"),
+            encoding.checked_length(
+                dk_pke, decryption_key_size(k), "a K-PKE decryption key"
+            ),
             12,
             k,
         )

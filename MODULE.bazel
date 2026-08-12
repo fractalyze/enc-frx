@@ -180,13 +180,11 @@ http_archive(
 # 3 for ML-KEM-512 and 2 for the other two, so a single file gates one of the
 # two centered-binomial widths and silently skips the other.
 #
-# The sets predate the final standard in exactly one place: they expand
-# `(ρ, σ) ← G(d)`, where FIPS 203 Algorithm 13 line 1 is `G(d ‖ k)`. Everything
-# they publish from `ρ` and `σ` onward is current, the `SampleNTT` index order
-# included, so the gap is one line of key generation and it is gated separately —
-# see `docs/schemes/ml-kem.md`. Worth re-reading before this pin is ever moved
-# forward: a set regenerated against the final standard closes the gap and makes
-# that separate gate removable.
+# Pinned to a commit that predates the final standard in one line — these sets
+# expand `(ρ, σ) ← G(d)`, not `G(d ‖ k)` — which `docs/schemes/ml-kem.md`
+# explains and key generation is gated around. Worth reading before this pin is
+# moved: a set regenerated against the final standard closes that gap and makes
+# the separate gate removable.
 CCTV_COMMIT = "1e3d2860d46e94e777e1b17c7a6f2436387e3ecc"
 
 http_file(

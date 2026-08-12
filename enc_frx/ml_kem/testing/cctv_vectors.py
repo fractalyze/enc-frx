@@ -6,12 +6,10 @@ once where they are pinned: [`//MODULE.bazel`](../../../MODULE.bazel). This
 module finds them in runfiles and parses them, so a test asks for a parameter set
 and never for a path.
 
-**The `intermediate/` files are FIPS 203 *draft*-era in one place.** They expand
-`(ρ, σ) ← G(d)`, where the final standard's Algorithm 13 line 1 is `G(d ‖ k)`.
-Everything the files publish from `ρ` and `σ` onward matches the final standard —
-including the `SampleNTT` index order, which they already carry the erratum for —
-so they gate every step except that one. A caller that starts from `d` is
-comparing against the draft; see `k_pke_test.py` for what covers the gap.
+**The `intermediate/` files are FIPS 203 draft-era in one line**: they expand
+`(ρ, σ) ← G(d)`, not the final standard's `G(d ‖ k)`, so a caller that starts
+from `d` is comparing against the draft. What that does and does not gate is in
+[`docs/schemes/ml-kem.md`](../../../docs/schemes/ml-kem.md).
 
 The file format is ` = `-separated, and **a line is not a pair.** The first
 segment is the name and every later one is another way of writing the same
@@ -39,7 +37,10 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 
+import numpy as np
 from python.runfiles import runfiles
+
+from enc_frx.ml_kem.encoding import decode_vector
 
 _HEX = re.compile(r"\A[0-9a-f]+\Z")
 _LIST = re.compile(r"\A\{(.*)\}\Z")
@@ -60,6 +61,10 @@ class Intermediate:
         """The `index`-th `name`, from whichever segment is a decimal list."""
         raw = self._segment(name, index, _LIST, "a decimal list")
         return [int(piece) for piece in raw[1:-1].split(",")]
+
+    def array_at(self, name: str, index: int = 0) -> np.ndarray:
+        """`hex_at` as the `[L]` uint8 array every caller here actually wants."""
+        return np.frombuffer(self.hex_at(name, index), dtype=np.uint8)
 
     def _segment(
         self, name: str, index: int, pattern: re.Pattern[str], described: str
@@ -101,13 +106,20 @@ def intermediate(parameter_set: str) -> Intermediate:
 
 @functools.lru_cache(maxsize=None)
 def unlucky_seeds(parameter_set: str) -> tuple[bytes, ...]:
-    """The `unluckysample/` seeds for a parameter set.
+    """The `unluckysample/` seeds for a parameter set."""
+    return _load_unlucky_seeds(_path("unlucky", parameter_set))
 
-    A tuple rather than the parser's list because the value is shared across
-    callers once cached, and a mutable one could be edited out from under the
-    next reader.
+
+def decode_polys(packed: bytes, count: int) -> np.ndarray:
+    """A published polynomial value back to `[count, 256]` integers.
+
+    The files encode every polynomial, vector and matrix with `ByteEncode_12`
+    (their header says so), so the width is fixed here rather than asked for.
+
+    It runs through the production decoder, which is what makes `A[0, 0]`'s
+    decimal listing worth checking separately — see `sampling_test.py`.
     """
-    return tuple(_load_unlucky_seeds(_path("unlucky", parameter_set)))
+    return np.asarray(decode_vector(np.frombuffer(packed, dtype=np.uint8), 12, count))
 
 
 def _load_intermediate(path: str) -> Intermediate:
@@ -126,18 +138,21 @@ def _load_intermediate(path: str) -> Intermediate:
     return Intermediate(dict(values))
 
 
-def _load_unlucky_seeds(path: str) -> list[bytes]:
+def _load_unlucky_seeds(path: str) -> tuple[bytes, ...]:
     """The `d` seeds from an `unluckysample/` file.
 
     `d` alone, because that is what the sampler needs: `rho` is the first half of
     `G(d)` in these files, and everything else in them is downstream of a whole
     key generation.
+
+    A tuple because the value is shared across callers once cached, and a mutable
+    one could be edited out from under the next reader.
     """
-    seeds = [
+    seeds = tuple(
         bytes.fromhex(line.split(" = ", 1)[1].strip())
         for line in open(path, encoding="utf-8")
         if line.startswith("d = ")
-    ]
+    )
     if not seeds:
         raise ValueError(f"{path}: no `d = ` lines")
     return seeds

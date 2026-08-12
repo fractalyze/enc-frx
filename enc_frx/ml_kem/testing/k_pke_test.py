@@ -9,14 +9,11 @@ Two gates that fail on different things:
 - **Round trips over random input** cover the space between those three points,
   and the batch axis, which a single published run cannot.
 
-**The published vectors predate one line of the final standard.** FIPS 203
-Algorithm 13 expands `(ρ, σ) ← G(d ‖ k)`; the draft expanded `G(d)`, and CCTV's
-files still do — their `ρ` is `SHA3-512(d)[:32]` for all three parameter sets.
-Everything downstream of `ρ` and `σ` is current, which is why `_key_pair` is
-entered directly here and `key_gen`'s own test pins the expansion against
-`hashlib`. Feeding CCTV's `d` to `key_gen` and expecting CCTV's `ek` is the trap
-this arrangement exists to avoid: it fails, and the standard-conforming code is
-what would look wrong.
+**The published vectors predate one line of the final standard**, which is why
+key generation is gated in two pieces here — `_key_pair` against the vectors,
+and `key_gen`'s `G(d ‖ k)` expansion against `hashlib`. The full account, and
+the wrong repair it exists to prevent, is in
+[`docs/schemes/ml-kem.md`](../../../docs/schemes/ml-kem.md).
 """
 
 from __future__ import annotations
@@ -28,15 +25,15 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 from enc_frx.ml_kem import k_pke
-from enc_frx.ml_kem.encoding import decode_vector
 from enc_frx.ml_kem.ntt import as_ints
 from enc_frx.ml_kem.params import (
-    POLY_BYTES,
     SEED_SIZE,
     ciphertext_size,
+    decryption_key_size,
     encapsulation_key_size,
 )
 from enc_frx.ml_kem.testing import cctv_vectors
+from enc_frx.testing.kat import to_bytes
 
 # (parameter set, k, eta1, eta2, du, dv) — FIPS 203 Table 2.
 _PARAMETER_SETS = (
@@ -48,26 +45,31 @@ _PARAMETER_SETS = (
 # The same rows with the name repeated as the absl case label.
 _NAMED = tuple((row[0], *row) for row in _PARAMETER_SETS)
 
-# One parameter set for the tests that are about the assembly rather than about
-# the numbers, so they run once instead of three times.
-_MID = dict(zip(("k", "eta1", "eta2", "du", "dv"), _PARAMETER_SETS[1][1:]))
-
-
-def _bytes(value: object) -> bytes:
-    return bytes(np.asarray(value).astype(np.uint8))
-
-
-def _polys(packed: bytes, count: int) -> np.ndarray:
-    """A CCTV polynomial value — `ByteEncode_12`'d — back to `[count, 256]`."""
-    return np.asarray(decode_vector(np.frombuffer(packed, dtype=np.uint8), 12, count))
-
-
-def _hex_array(vectors: cctv_vectors.Intermediate, name: str, index: int = 0) -> object:
-    return np.frombuffer(vectors.hex_at(name, index), dtype=np.uint8)
+# ML-KEM-768, for the tests that are about the assembly rather than about the
+# numbers, so they run once instead of three times. `decrypt` and `key_gen` take
+# subsets, and spelling those out per call site is what buries the argument that
+# matters under four that do not.
+_768 = dict(zip(("k", "eta1", "eta2", "du", "dv"), _PARAMETER_SETS[1][1:], strict=True))
+_768_KEY_GEN = {name: _768[name] for name in ("k", "eta1")}
+_768_DECRYPT = {name: _768[name] for name in ("k", "du", "dv")}
 
 
 def _zeros(size: int) -> np.ndarray:
     return np.zeros(size, dtype=np.uint8)
+
+
+def _encrypt_inputs(parameter_set: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`(ek, m, r)` as published.
+
+    `r` names two things in the file — the 32-byte randomness first, the vector
+    sampled from it later — so occurrence 0 is the one `encrypt` takes.
+    """
+    vectors = cctv_vectors.intermediate(parameter_set)
+    return (
+        vectors.array_at("ek"),
+        vectors.array_at("m"),
+        vectors.array_at("r", 0),
+    )
 
 
 class KeyGenTest(parameterized.TestCase):
@@ -77,35 +79,34 @@ class KeyGenTest(parameterized.TestCase):
     ) -> None:
         vectors = cctv_vectors.intermediate(parameter_set)
         ek, dk = k_pke._key_pair(
-            _hex_array(vectors, "ρ"), _hex_array(vectors, "σ"), k=k, eta1=eta1
+            vectors.array_at("ρ"), vectors.array_at("σ"), k=k, eta1=eta1
         )
         # `ek_PKE` is `ByteEncode_12(t̂) ‖ ρ`, so this pins `t̂` exactly as well.
-        self.assertEqual(_bytes(ek), vectors.hex_at("ek"))
+        self.assertEqual(to_bytes(ek), vectors.hex_at("ek"))
         # `dkPKE` appears twice in the file: first as `dkPKE = NTT(s) = …`, the
         # 384k bytes meant here, and later as an 800-byte value equal to `ek` —
         # an upstream slip for `ekPKE`. Index 0 is the one to ask for.
-        self.assertEqual(_bytes(dk), vectors.hex_at("dkPKE", 0))
+        self.assertEqual(to_bytes(dk), vectors.hex_at("dkPKE", 0))
 
     @parameterized.named_parameters(*_NAMED)
     def test_the_seed_expansion_binds_the_parameter_set(
         self, parameter_set: str, k: int, eta1: int, _eta2: int, _du: int, _dv: int
     ) -> None:
-        # `G(d ‖ k)` is Algorithm 13 line 1 of the final standard, and no vector
-        # loaded here can see the `k` byte — see the module docstring. It is
-        # pinned against `hashlib` instead, which is where SHA3-512 is
-        # established for this repo anyway, and the lattice work below it is
-        # already pinned by the vectors above.
-        d = _hex_array(cctv_vectors.intermediate(parameter_set), "d")
-        expanded = hashlib.sha3_512(bytes(np.asarray(d)) + bytes([k])).digest()
+        # No vector loaded here carries the `k` byte (module docstring), so the
+        # expansion is pinned against `hashlib` — where SHA3-512 is established
+        # for this repo anyway — and the lattice work below it by the vectors
+        # above.
+        d = cctv_vectors.intermediate(parameter_set).hex_at("d")
+        expanded = hashlib.sha3_512(d + bytes([k])).digest()
         want = k_pke._key_pair(
             np.frombuffer(expanded[:SEED_SIZE], dtype=np.uint8),
             np.frombuffer(expanded[SEED_SIZE:], dtype=np.uint8),
             k=k,
             eta1=eta1,
         )
-        got = k_pke.key_gen(d, k=k, eta1=eta1)
+        got = k_pke.key_gen(np.frombuffer(d, dtype=np.uint8), k=k, eta1=eta1)
         self.assertEqual(
-            [_bytes(part) for part in got], [_bytes(part) for part in want]
+            [to_bytes(part) for part in got], [to_bytes(part) for part in want]
         )
 
     def test_a_batch_of_seeds_generates_the_same_keys_one_at_a_time(self) -> None:
@@ -113,9 +114,9 @@ class KeyGenTest(parameterized.TestCase):
         # but nothing here is written per-entry either, so the leading axis works
         # — and an implementation that mixed entries would still round-trip.
         seeds = np.random.default_rng(0).integers(0, 256, (4, SEED_SIZE), np.uint8)
-        batched = k_pke.key_gen(seeds, k=_MID["k"], eta1=_MID["eta1"])
+        batched = k_pke.key_gen(seeds, **_768_KEY_GEN)
         for row, seed in enumerate(seeds):
-            solo = k_pke.key_gen(seed, k=_MID["k"], eta1=_MID["eta1"])
+            solo = k_pke.key_gen(seed, **_768_KEY_GEN)
             for batched_part, solo_part in zip(batched, solo):
                 np.testing.assert_array_equal(
                     np.asarray(batched_part)[row], np.asarray(solo_part)
@@ -127,54 +128,42 @@ class EncryptTest(parameterized.TestCase):
     def test_the_ciphertext_matches_the_published_vector(
         self, parameter_set: str, k: int, eta1: int, eta2: int, du: int, dv: int
     ) -> None:
-        vectors = cctv_vectors.intermediate(parameter_set)
-        # `r` names two different things in the file — the 32-byte randomness
-        # first, the vector sampled from it later. Occurrence 0 is the seed.
         got = k_pke.encrypt(
-            _hex_array(vectors, "ek"),
-            _hex_array(vectors, "m"),
-            _hex_array(vectors, "r", 0),
+            *_encrypt_inputs(parameter_set),
             k=k,
             eta1=eta1,
             eta2=eta2,
             du=du,
             dv=dv,
         )
-        self.assertEqual(_bytes(got), vectors.hex_at("c"))
+        self.assertEqual(
+            to_bytes(got), cctv_vectors.intermediate(parameter_set).hex_at("c")
+        )
 
     def test_the_same_randomness_gives_the_same_ciphertext(self) -> None:
-        # The property decapsulation's re-encryption check rests on. It cannot
-        # fail today — nothing here draws randomness — which is the point: an
-        # `encrypt` that started to would break `decaps` and nothing else, and
-        # would break it into always returning the implicit-rejection secret.
-        vectors = cctv_vectors.intermediate("ML-KEM-768")
-        args = (
-            _hex_array(vectors, "ek"),
-            _hex_array(vectors, "m"),
-            _hex_array(vectors, "r", 0),
-        )
+        # The property decapsulation's re-encryption check rests on, and it
+        # cannot fail today — which is the point. See `k_pke`'s module docstring
+        # for what an `encrypt` that drew its own randomness would break.
+        args = _encrypt_inputs("ML-KEM-768")
         self.assertEqual(
-            _bytes(k_pke.encrypt(*args, **_MID)), _bytes(k_pke.encrypt(*args, **_MID))
+            to_bytes(k_pke.encrypt(*args, **_768)),
+            to_bytes(k_pke.encrypt(*args, **_768)),
         )
 
     def test_different_randomness_gives_a_different_ciphertext(self) -> None:
         # And `r` is actually read: an `encrypt` that ignored it would be
         # deterministic too, and every round trip would still pass.
-        vectors = cctv_vectors.intermediate("ML-KEM-768")
-        ek, m = _hex_array(vectors, "ek"), _hex_array(vectors, "m")
-        first = k_pke.encrypt(ek, m, _zeros(SEED_SIZE), **_MID)
-        second = k_pke.encrypt(ek, m, _zeros(SEED_SIZE) + 1, **_MID)
-        self.assertNotEqual(_bytes(first), _bytes(second))
+        ek, m, _ = _encrypt_inputs("ML-KEM-768")
+        first = k_pke.encrypt(ek, m, _zeros(SEED_SIZE), **_768)
+        second = k_pke.encrypt(ek, m, _zeros(SEED_SIZE) + 1, **_768)
+        self.assertNotEqual(to_bytes(first), to_bytes(second))
 
     def test_the_traced_ciphertext_matches_the_eager_one(self) -> None:
-        vectors = cctv_vectors.intermediate("ML-KEM-768")
-        args = (
-            _hex_array(vectors, "ek"),
-            _hex_array(vectors, "m"),
-            _hex_array(vectors, "r", 0),
+        args = _encrypt_inputs("ML-KEM-768")
+        traced = frx.jit(lambda ek, m, r: k_pke.encrypt(ek, m, r, **_768))
+        self.assertEqual(
+            to_bytes(traced(*args)), to_bytes(k_pke.encrypt(*args, **_768))
         )
-        traced = frx.jit(lambda ek, m, r: k_pke.encrypt(ek, m, r, **_MID))
-        self.assertEqual(_bytes(traced(*args)), _bytes(k_pke.encrypt(*args, **_MID)))
 
 
 class DecryptTest(parameterized.TestCase):
@@ -184,9 +173,9 @@ class DecryptTest(parameterized.TestCase):
     ) -> None:
         vectors = cctv_vectors.intermediate(parameter_set)
         got = k_pke.decrypt(
-            _hex_array(vectors, "dkPKE", 0), _hex_array(vectors, "c"), k=k, du=du, dv=dv
+            vectors.array_at("dkPKE", 0), vectors.array_at("c"), k=k, du=du, dv=dv
         )
-        self.assertEqual(_bytes(got), vectors.hex_at("m"))
+        self.assertEqual(to_bytes(got), vectors.hex_at("m"))
 
     @parameterized.named_parameters(*_NAMED)
     def test_the_noisy_message_matches_before_the_rounding(
@@ -197,10 +186,11 @@ class DecryptTest(parameterized.TestCase):
         # every ciphertext ever generated.
         vectors = cctv_vectors.intermediate(parameter_set)
         got = k_pke._noisy_message(
-            _hex_array(vectors, "dkPKE", 0), _hex_array(vectors, "c"), k=k, du=du, dv=dv
+            vectors.array_at("dkPKE", 0), vectors.array_at("c"), k=k, du=du, dv=dv
         )
         np.testing.assert_array_equal(
-            np.asarray(as_ints(got)), _polys(vectors.hex_at("w"), 1)[0]
+            np.asarray(as_ints(got)),
+            cctv_vectors.decode_polys(vectors.hex_at("w"), 1)[0],
         )
 
 
@@ -228,17 +218,18 @@ class RoundTripTest(parameterized.TestCase):
         # wrong axis, a broadcast that should have been an index — round-trips
         # perfectly, because both directions leak the same way.
         rng = np.random.default_rng(7)
-        batch = 3
+        # The same batch the tests above use, so this reuses their compiled
+        # shapes rather than forcing a whole second set for one more entry.
+        batch = 4
         ek, _ = k_pke.key_gen(
             rng.integers(0, 256, (batch, SEED_SIZE), np.uint8),
-            k=_MID["k"],
-            eta1=_MID["eta1"],
+            **_768_KEY_GEN,
         )
         m = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
         r = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
-        got = np.asarray(k_pke.encrypt(ek, m, r, **_MID))
+        got = np.asarray(k_pke.encrypt(ek, m, r, **_768))
         for row in range(batch):
-            solo = k_pke.encrypt(np.asarray(ek)[row], m[row], r[row], **_MID)
+            solo = k_pke.encrypt(np.asarray(ek)[row], m[row], r[row], **_768)
             np.testing.assert_array_equal(got[row], np.asarray(solo))
 
 
@@ -251,40 +242,38 @@ class LengthCheckTest(absltest.TestCase):
     input to route through a rejection path.
     """
 
-    _EK = encapsulation_key_size(_MID["k"])
-    _DK = POLY_BYTES * _MID["k"]
-    _C = ciphertext_size(_MID["k"], _MID["du"], _MID["dv"])
+    _EK = encapsulation_key_size(_768["k"])
+    _DK = decryption_key_size(_768["k"])
+    _C = ciphertext_size(_768["k"], _768["du"], _768["dv"])
 
     def test_rejects_a_short_encapsulation_key(self) -> None:
         with self.assertRaises(ValueError):
             k_pke.encrypt(
-                _zeros(self._EK - 1), _zeros(SEED_SIZE), _zeros(SEED_SIZE), **_MID
+                _zeros(self._EK - 1), _zeros(SEED_SIZE), _zeros(SEED_SIZE), **_768
             )
 
     def test_rejects_a_message_that_is_not_32_bytes(self) -> None:
         with self.assertRaises(ValueError):
             k_pke.encrypt(
-                _zeros(self._EK), _zeros(SEED_SIZE + 1), _zeros(SEED_SIZE), **_MID
+                _zeros(self._EK), _zeros(SEED_SIZE + 1), _zeros(SEED_SIZE), **_768
             )
 
     def test_rejects_randomness_that_is_not_32_bytes(self) -> None:
         with self.assertRaises(ValueError):
             k_pke.encrypt(
-                _zeros(self._EK), _zeros(SEED_SIZE), _zeros(SEED_SIZE - 1), **_MID
+                _zeros(self._EK), _zeros(SEED_SIZE), _zeros(SEED_SIZE - 1), **_768
             )
 
     def test_rejects_a_short_key_generation_seed(self) -> None:
         with self.assertRaises(ValueError):
-            k_pke.key_gen(_zeros(SEED_SIZE - 1), k=_MID["k"], eta1=_MID["eta1"])
+            k_pke.key_gen(_zeros(SEED_SIZE - 1), **_768_KEY_GEN)
 
     def test_rejects_a_short_decryption_key(self) -> None:
         with self.assertRaises(ValueError):
             k_pke.decrypt(
                 _zeros(self._DK - 1),
                 _zeros(self._C),
-                k=_MID["k"],
-                du=_MID["du"],
-                dv=_MID["dv"],
+                **_768_DECRYPT,
             )
 
     def test_rejects_a_short_ciphertext(self) -> None:
@@ -292,9 +281,7 @@ class LengthCheckTest(absltest.TestCase):
             k_pke.decrypt(
                 _zeros(self._DK),
                 _zeros(self._C - 1),
-                k=_MID["k"],
-                du=_MID["du"],
-                dv=_MID["dv"],
+                **_768_DECRYPT,
             )
 
 

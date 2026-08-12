@@ -28,7 +28,6 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 from enc_frx.ml_kem import hashes, sampling
-from enc_frx.ml_kem.encoding import decode_vector
 from enc_frx.ml_kem.ntt import as_ints
 from enc_frx.ml_kem.params import N
 from enc_frx.ml_kem.testing import cctv_vectors
@@ -72,21 +71,15 @@ def _sample_ntt_lowering() -> str:
     return str(frx.jit(sampling.sample_ntt).lower(seeds).as_text())
 
 
-def _decode_vector(packed: bytes, k: int) -> np.ndarray:
-    """ByteEncode_12 of `k` polynomials back to `[k, 256]` integers."""
-    return np.asarray(decode_vector(np.frombuffer(packed, dtype=np.uint8), 12, k))
-
-
 class SampleNttTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_matrix_matches_the_published_intermediate_value(
         self, parameter_set: str, k: int, _eta1: int, _eta2: int
     ) -> None:
         vectors = cctv_vectors.intermediate(parameter_set)
-        rho = vectors.hex_at("ρ")
-        want = _decode_vector(vectors.hex_at("A"), k * k).reshape(k, k, N)
+        want = cctv_vectors.decode_polys(vectors.hex_at("A"), k * k).reshape(k, k, N)
 
-        got = as_ints(sampling.expand_matrix(np.frombuffer(rho, dtype=np.uint8), k))
+        got = as_ints(sampling.expand_matrix(vectors.array_at("ρ"), k))
         np.testing.assert_array_equal(np.asarray(got), want)
 
     @parameterized.named_parameters(*_NAMED)
@@ -97,7 +90,7 @@ class SampleNttTest(parameterized.TestCase):
         # this is the one check that does not route through `byte_decode` — a
         # decoder bug cannot make both pass.
         vectors = cctv_vectors.intermediate(parameter_set)
-        rho = np.frombuffer(vectors.hex_at("ρ"), dtype=np.uint8)
+        rho = vectors.array_at("ρ")
         got = as_ints(sampling.expand_matrix(rho, k))
         np.testing.assert_array_equal(
             np.asarray(got)[0, 0], np.array(vectors.ints_at("A[0, 0]"))
@@ -109,7 +102,7 @@ class SampleNttTest(parameterized.TestCase):
         # this asserts the matrix is not symmetric, which is what makes the
         # vector check above able to tell.
         vectors = cctv_vectors.intermediate("ML-KEM-512")
-        rho = np.frombuffer(vectors.hex_at("ρ"), dtype=np.uint8)
+        rho = vectors.array_at("ρ")
         got = np.asarray(as_ints(sampling.expand_matrix(rho, 2)))
         self.assertFalse(np.array_equal(got[0, 1], got[1, 0]))
 
@@ -211,13 +204,17 @@ class SamplePolyCbdTest(parameterized.TestCase):
         # Algorithm 13: `s` takes nonces 0..k-1 and `e` takes k..2k-1, both at
         # eta1, both from sigma.
         vectors = cctv_vectors.intermediate(parameter_set)
-        sigma = np.frombuffer(vectors.hex_at("σ"), dtype=np.uint8)
+        sigma = vectors.array_at("σ")
         nonces = np.arange(2 * k, dtype=np.uint8)
         got = np.asarray(
             as_ints(sampling.sample_poly_cbd(hashes.prf(eta1, sigma, nonces), eta1))
         )
-        np.testing.assert_array_equal(got[:k], _decode_vector(vectors.hex_at("s"), k))
-        np.testing.assert_array_equal(got[k:], _decode_vector(vectors.hex_at("e"), k))
+        np.testing.assert_array_equal(
+            got[:k], cctv_vectors.decode_polys(vectors.hex_at("s"), k)
+        )
+        np.testing.assert_array_equal(
+            got[k:], cctv_vectors.decode_polys(vectors.hex_at("e"), k)
+        )
 
     @parameterized.named_parameters(*_NAMED)
     def test_encryption_vectors_match_at_both_etas(
@@ -228,13 +225,13 @@ class SamplePolyCbdTest(parameterized.TestCase):
         # continues across them are the part a per-vector transcription gets
         # wrong.
         vectors = cctv_vectors.intermediate(parameter_set)
-        seed = np.frombuffer(vectors.hex_at("r", 0), dtype=np.uint8)
+        seed = vectors.array_at("r", 0)
 
         r = sampling.sample_poly_cbd(
             hashes.prf(eta1, seed, np.arange(k, dtype=np.uint8)), eta1
         )
         np.testing.assert_array_equal(
-            np.asarray(as_ints(r)), _decode_vector(vectors.hex_at("r", 1), k)
+            np.asarray(as_ints(r)), cctv_vectors.decode_polys(vectors.hex_at("r", 1), k)
         )
 
         tail = sampling.sample_poly_cbd(
@@ -242,10 +239,10 @@ class SamplePolyCbdTest(parameterized.TestCase):
         )
         packed = np.asarray(as_ints(tail))
         np.testing.assert_array_equal(
-            packed[:k], _decode_vector(vectors.hex_at("e1"), k)
+            packed[:k], cctv_vectors.decode_polys(vectors.hex_at("e1"), k)
         )
         np.testing.assert_array_equal(
-            packed[k:], _decode_vector(vectors.hex_at("e2"), 1)
+            packed[k:], cctv_vectors.decode_polys(vectors.hex_at("e2"), 1)
         )
 
     @parameterized.parameters(2, 3)
