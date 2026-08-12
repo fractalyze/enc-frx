@@ -79,47 +79,63 @@ layout whose margin rests on that bound is gated by a **differential test agains
 Python's arbitrary-precision integers**, over extreme inputs as well as random
 ones — a published vector set never approaches the worst case.
 
-## The lattice NTT is per-repo, and the shape is the shared part
+## The lattice NTT is the opcode; what is per-repo is the caller
 
-ML-KEM's NTT lives here; ML-DSA's lives in
-[`sig-frx`](https://github.com/fractalyze/sig-frx). They are deliberately not
-shared, and the reason is not that sharing would be hard — it is that the two
-transforms disagree about the things a shared implementation would have to hold
-fixed.
+ML-KEM and ML-DSA multiply in the negacyclic ring `Z_q[X]/(X^n + 1)`, which is
+`frx.lax.ntt`'s `NEGACYCLIC_NTT`. Neither repo implements the transform. What
+each writes is the part its standard specifies and the opcode has no notion of.
+
+They are not even different lengths in a deep sense. A length-`n` negacyclic
+transform needs a primitive `2n`-th root, and the 2-adicity of `q - 1` decides
+whether one exists — 13 for ML-DSA, 8 for ML-KEM. So ML-DSA gets length 256
+directly, and ML-KEM gets length 128 applied to the even and odd coefficient
+halves, which is exactly what FIPS 203's "incomplete" NTT and its degree-1 base
+case `mod (X^2 - zeta)` describe. Reframing, not a different algorithm.
 
 | | ML-KEM (FIPS 203) | ML-DSA (FIPS 204) |
 | --- | --- | --- |
-| modulus | 3329 (12-bit) | 8380417 (23-bit) |
-| depth | 7 layers, **incomplete** | 8 layers, complete |
-| base case | degree-1 products mod `X² − ζ` | pointwise |
-| worst-case product | 2^24 — fits a lane | 2^46 — **does not** |
+| the transform | two length-128 `NEGACYCLIC_NTT` | one length-256 `NEGACYCLIC_NTT` |
+| what the repo writes | even/odd split, `BitRev7` order, `base_mul` | nothing beyond the call |
+| base case | degree-1 products mod `X^2 - zeta` | pointwise |
 
-The last row decides it, and it follows from the section above. A product of two
-ML-KEM residues is at most 11075584 and computes exactly in a 32-bit lane; a
-product of two ML-DSA residues is about 7·10^13, which a lane neither holds nor
-complains about — it returns a wrong number. So ML-DSA needs a split
-representation that ML-KEM does not, and an NTT "parameterized over the modulus"
-would be parameterizing the representation of a field element rather than a
-constant.
+So there is nothing to share and nothing to home. The question of whether
+`hash-frx` should hold a common implementation is moot — it was the wrong home
+anyway, being the *symmetric* layer — because there is no common implementation
+to place.
 
-The incomplete transform says the same thing about the algorithm rather than the
-arithmetic: ML-KEM stops one layer early and its base case multiplies degree-1
-polynomials, so that step is different code, not a different constant.
+### The argument that used to decide this, and why it no longer applies
 
-What is genuinely common is the layer-walk skeleton — a few dozen lines, which is
-not enough to carry a cross-repo pin. `hash-frx` is the wrong home for it in any
-case, being the *symmetric* layer: a lattice NTT is not a hash and does not belong
-there merely because both repos already depend on it.
+An earlier draft of this section turned on lane width: a product of two ML-DSA
+residues is about 7·10^13, which a 32-bit lane neither holds nor complains
+about, while a product of two ML-KEM residues fits. That looked decisive — it
+implied the two schemes need different *representations*, so an NTT
+"parameterized over the modulus" would be parameterizing the representation of a
+field element rather than a constant.
 
-So each repo implements its own, and the convention is that the two **look
-alike**: same module layout, the same names (`ntt`, `intt`, `base_mul`,
-`montgomery_reduce`), the same twiddle-table generation style. The cost being
-avoided is not duplicated lines — it is two implementations that look unrelated,
-so a bug fixed in one is never looked for in the other. Whoever writes the second
-should be able to read the first.
+It binds hand-written arithmetic over integer lanes and nothing else. Both
+schemes now run on a field dtype that reduces internally, so no residue ever
+occupies a raw integer lane and no product ever overflows one. The constraint was
+real and is now absent; it should not be cited again.
 
-Revisit when a third lattice scheme appears. Two implementations are not evidence
-for an abstraction; three usually are.
+### Two things a caller must pin, both of which fail silently
+
+Neither is checkable by inspection, and both survive every self-consistent test:
+
+- **The root.** Unpinned, the opcode *searches* for a primitive root and finds
+  one. That is a correct transform and a wrong standard — it round-trips, and its
+  pointwise product is still a negacyclic convolution, so only a comparison
+  against the specification's own algorithms catches it. `generator=` takes a
+  group generator `g`, not the root: the transform uses `g^((q-1)/n)`.
+- **The output order.** The opcode returns natural order; both standards index
+  their outputs bit-reversed.
+
+The consequence for tests is that a round trip is not evidence. Pin against the
+standard's algorithms transcribed into plain integers.
+
+### What still exists and should not
+
+`sig-frx` carries a hand-written ML-DSA NTT, written before the opcode could run
+either modulus. It is deletable rather than maintainable. ML-KEM never grew one.
 
 ## Failure is a value, and the two seams disagree on purpose
 
