@@ -51,9 +51,14 @@ WIDTHS = (1, 4, 5, 10, 11, 12)
 def checked_length(value: ArrayLike, size: int, name: str) -> Array:
     """Pin a byte string's length at trace time, mirroring `AesGcm._checked`.
 
-    Public because `sampling.py` and `hashes.py` check seeds and PRF output the
-    same way. FIPS 203 fixes every one of those lengths, so a per-module copy of
-    the cast-and-compare would be three chances to word the same rule differently.
+    Public because `sampling.py` checks its seeds and its PRF output the same
+    way, and already depends on this module for the bit order. FIPS 203 fixes
+    every one of those lengths, so a copy per call site would be four chances to
+    word one rule differently.
+
+    It does not follow that every module should reach for it. `hashes.py` keeps
+    its own three-line check rather than take a dependency on the wire formats to
+    validate a seed, which is what `AesGcm._checked` does too.
 
     The type check of FIPS 203 §7.2/§7.3 is normative and sits at a different
     altitude from the modulus check below it: a length is static in a traced

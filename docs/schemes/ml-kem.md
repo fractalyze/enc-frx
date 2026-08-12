@@ -80,9 +80,25 @@ makes no constant-time claim, and the items below are named rather than fixed.
   samples it. The derandomized entry point the known-answer tests need lives
   below the seam.
 
-## Gating
+## The gate
 
-The samplers are pinned against C2SP's CCTV vectors rather than ACVP alone,
-because ACVP publishes `(d, z) -> (ek, dk)` and nothing between — it cannot pin a
-sampler on its own. The rationale for each set, and why all three parameter sets
-are needed, is at its declaration in [`MODULE.bazel`](../../MODULE.bazel).
+C2SP's CCTV vectors, fetched and sha256-pinned in
+[`../../MODULE.bazel`](../../MODULE.bazel), in two sets that answer different
+questions.
+
+**`intermediate/`** publishes `rho`, `sigma`, the matrix `A`, and the secret and
+error vectors as separate labelled values, which is what pins each sampler on its
+own. ACVP cannot: it publishes `(d, z) -> (ek, dk)` and nothing between, so it
+gates `SampleNTT` and `SamplePolyCBD` only as far as a whole key generation gates
+every step inside it — jointly, and only once key generation exists.
+
+All three parameter sets are loaded rather than one, because `eta1` is 3 for
+ML-KEM-512 and 2 for the other two. A single file gates one of the two
+centered-binomial widths and silently skips the other, and the skip is invisible:
+the width that does run passes, and nothing reports the one that did not.
+
+**`unluckysample/`** publishes seeds found by search whose rejection run is the
+worst known — 384 candidates against a mean of 315, or 576 bytes. They are the
+only published vectors that can see a fixed XOF budget being too small, because
+every ordinary vector fits in three SHAKE128 blocks. An undersized implementation
+therefore passes the entire rest of the corpus and fails only here.

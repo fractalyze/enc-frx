@@ -29,7 +29,7 @@ from absl.testing import absltest, parameterized
 from python.runfiles import runfiles
 
 from enc_frx.ml_kem import hashes, sampling
-from enc_frx.ml_kem.encoding import byte_decode
+from enc_frx.ml_kem.encoding import decode_vector
 from enc_frx.ml_kem.ntt import as_ints
 from enc_frx.ml_kem.params import N
 from enc_frx.ml_kem.testing import cctv_vectors
@@ -42,11 +42,10 @@ _PARAMETER_SETS = (
     ("ML-KEM-1024", 4, 2, 2),
 )
 
-# The same rows with the name repeated as the absl case label. Hoisted rather
-# than spelled out at each `named_parameters`, where four hand-kept copies of
-# one projection would have to stay identical.
+# The same rows with the name repeated as the absl case label, hoisted because
+# four `named_parameters` decorators would otherwise carry hand-kept copies of
+# one projection.
 _NAMED = tuple((row[0], *row) for row in _PARAMETER_SETS)
-_NAMES = tuple((row[0], row[0]) for row in _PARAMETER_SETS)
 
 
 def _path(repo: str, name: str) -> str:
@@ -55,23 +54,27 @@ def _path(repo: str, name: str) -> str:
     return location
 
 
+def _cctv_path(kind: str, parameter_set: str) -> str:
+    """A CCTV vector file: both sets name their files by the parameter set."""
+    bits = parameter_set.split("-")[-1]
+    return _path(f"cctv_ml_kem_{kind}_{bits}", f"ML-KEM-{bits}.txt")
+
+
 @functools.lru_cache(maxsize=None)
 def _intermediate(parameter_set: str) -> cctv_vectors.Intermediate:
     """Cached: five tests read ML-KEM-512's file, and parsing it is pure."""
-    bits = parameter_set.split("-")[-1]
-    return cctv_vectors.load_intermediate(
-        _path(f"cctv_ml_kem_intermediate_{bits}", f"ML-KEM-{bits}.txt")
-    )
+    return cctv_vectors.load_intermediate(_cctv_path("intermediate", parameter_set))
 
 
 @functools.lru_cache(maxsize=None)
 def _unlucky_seeds(parameter_set: str) -> tuple[bytes, ...]:
-    bits = parameter_set.split("-")[-1]
-    return tuple(
-        cctv_vectors.load_unlucky_seeds(
-            _path(f"cctv_ml_kem_unlucky_{bits}", f"ML-KEM-{bits}.txt")
-        )
-    )
+    """Cached: both `UnluckySeedTest` methods read the same file.
+
+    A tuple rather than the loader's list because the value is shared across
+    callers once cached, and a mutable one could be edited out from under the
+    next reader.
+    """
+    return tuple(cctv_vectors.load_unlucky_seeds(_cctv_path("unlucky", parameter_set)))
 
 
 def _xof_seeds(seeds: tuple[bytes, ...]) -> np.ndarray:
@@ -87,10 +90,21 @@ def _xof_seeds(seeds: tuple[bytes, ...]) -> np.ndarray:
     )
 
 
-def _decode_vector(packed: bytes) -> np.ndarray:
+@functools.lru_cache(maxsize=None)
+def _sample_ntt_lowering() -> str:
+    """`sample_ntt` lowered to StableHLO, once.
+
+    Cached because three tests read the same text, and a fresh `frx.jit` wrapper
+    carries its own trace cache — building one per test would re-trace the whole
+    program rather than hit a shared one.
+    """
+    seeds = fnp.zeros((4, sampling.MATRIX_SEED_SIZE), dtype=fnp.uint8)
+    return str(frx.jit(sampling.sample_ntt).lower(seeds).as_text())
+
+
+def _decode_vector(packed: bytes, k: int) -> np.ndarray:
     """ByteEncode_12 of `k` polynomials back to `[k, 256]` integers."""
-    data = np.frombuffer(packed, dtype=np.uint8).reshape(-1, 384)
-    return np.asarray(byte_decode(data, 12))
+    return np.asarray(decode_vector(np.frombuffer(packed, dtype=np.uint8), 12, k))
 
 
 class SampleNttTest(parameterized.TestCase):
@@ -100,7 +114,7 @@ class SampleNttTest(parameterized.TestCase):
     ) -> None:
         vectors = _intermediate(parameter_set)
         rho = vectors.hex_at("ρ")
-        want = _decode_vector(vectors.hex_at("A")).reshape(k, k, N)
+        want = _decode_vector(vectors.hex_at("A"), k * k).reshape(k, k, N)
 
         got = as_ints(sampling.expand_matrix(np.frombuffer(rho, dtype=np.uint8), k))
         np.testing.assert_array_equal(np.asarray(got), want)
@@ -130,18 +144,16 @@ class SampleNttTest(parameterized.TestCase):
         self.assertFalse(np.array_equal(got[0, 1], got[1, 0]))
 
     def test_matches_the_oracle_on_random_seeds(self) -> None:
+        # Through `expand_matrix` against the oracle's own matrix expansion, so
+        # the random sweep covers the `rho ‖ j ‖ i` index order too — the
+        # published vectors are the only other thing that pins it.
         rng = np.random.default_rng(0)
         for _ in range(4):
             rho = bytes(rng.integers(0, 256, 32, dtype=np.uint8))
-            seeds = np.array(
-                [list(rho) + [j, i] for i in range(2) for j in range(2)], dtype=np.uint8
+            got = np.asarray(
+                as_ints(sampling.expand_matrix(np.frombuffer(rho, dtype=np.uint8), 2))
             )
-            got = np.asarray(as_ints(sampling.sample_ntt(seeds)))
-            for row, (i, j) in enumerate((i, j) for i in range(2) for j in range(2)):
-                want = ref.sample_ntt(ref.shake128_stream(rho + bytes([j, i])))
-                np.testing.assert_array_equal(
-                    got[row], np.array(want), err_msg=f"{i},{j}"
-                )
+            np.testing.assert_array_equal(got, np.array(ref.sample_matrix(rho, 2)))
 
     def test_every_coefficient_is_reduced(self) -> None:
         rng = np.random.default_rng(1)
@@ -159,7 +171,7 @@ class SampleNttTest(parameterized.TestCase):
 class UnluckySeedTest(parameterized.TestCase):
     """The vectors that see an undersized XOF budget, and nothing else does."""
 
-    @parameterized.named_parameters(*_NAMES)
+    @parameterized.named_parameters(*((r[0], r[0]) for r in _PARAMETER_SETS))
     def test_the_worst_known_rejection_runs_still_fit(self, parameter_set: str) -> None:
         seeds = _unlucky_seeds(parameter_set)
         self.assertNotEmpty(seeds)
@@ -234,8 +246,8 @@ class SamplePolyCbdTest(parameterized.TestCase):
         got = np.asarray(
             as_ints(sampling.sample_poly_cbd(hashes.prf(eta1, sigma, nonces), eta1))
         )
-        np.testing.assert_array_equal(got[:k], _decode_vector(vectors.hex_at("s")))
-        np.testing.assert_array_equal(got[k:], _decode_vector(vectors.hex_at("e")))
+        np.testing.assert_array_equal(got[:k], _decode_vector(vectors.hex_at("s"), k))
+        np.testing.assert_array_equal(got[k:], _decode_vector(vectors.hex_at("e"), k))
 
     @parameterized.named_parameters(*_NAMED)
     def test_encryption_vectors_match_at_both_etas(
@@ -252,15 +264,19 @@ class SamplePolyCbdTest(parameterized.TestCase):
             hashes.prf(eta1, seed, np.arange(k, dtype=np.uint8)), eta1
         )
         np.testing.assert_array_equal(
-            np.asarray(as_ints(r)), _decode_vector(vectors.hex_at("r", 1))
+            np.asarray(as_ints(r)), _decode_vector(vectors.hex_at("r", 1), k)
         )
 
         tail = sampling.sample_poly_cbd(
             hashes.prf(eta2, seed, np.arange(k, 2 * k + 1, dtype=np.uint8)), eta2
         )
         packed = np.asarray(as_ints(tail))
-        np.testing.assert_array_equal(packed[:k], _decode_vector(vectors.hex_at("e1")))
-        np.testing.assert_array_equal(packed[k:], _decode_vector(vectors.hex_at("e2")))
+        np.testing.assert_array_equal(
+            packed[:k], _decode_vector(vectors.hex_at("e1"), k)
+        )
+        np.testing.assert_array_equal(
+            packed[k:], _decode_vector(vectors.hex_at("e2"), 1)
+        )
 
     @parameterized.parameters(2, 3)
     def test_matches_the_oracle_on_random_input(self, eta: int) -> None:
@@ -303,8 +319,7 @@ class TracedShapeTest(absltest.TestCase):
     """
 
     def _lowered(self) -> str:
-        seeds = fnp.zeros((4, sampling.MATRIX_SEED_SIZE), dtype=fnp.uint8)
-        return frx.jit(sampling.sample_ntt).lower(seeds).as_text()
+        return _sample_ntt_lowering()
 
     def test_the_sampling_path_has_no_data_dependent_control_flow(self) -> None:
         text = self._lowered()

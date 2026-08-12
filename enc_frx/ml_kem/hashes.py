@@ -33,7 +33,6 @@ from hash_frx.keccak.byte_hashes import (
     Shake256,
 )
 
-from enc_frx.ml_kem.encoding import checked_length
 from enc_frx.ml_kem.params import SEED_SIZE
 
 # Re-exported rather than restated: `sampling.py` sizes its XOF budget in whole
@@ -96,7 +95,14 @@ def prf(eta: int, seed: ArrayLike, nonce: ArrayLike) -> Array:
     """
     if eta not in ETAS:
         raise ValueError(f"FIPS 203 uses eta in {ETAS}, got {eta}")
-    s = checked_length(seed, SEED_SIZE, "a PRF seed")
+    # Checked here rather than through `encoding.checked_length`: this module
+    # depends on `params` alone, as every sibling at this layer does, and reusing
+    # that helper would pull the whole wire-format module into a hash's build
+    # closure for three lines. `AesGcm._checked` keeps its own copy for the same
+    # reason.
+    s = fnp.asarray(seed).astype(np.uint8)
+    if s.shape[-1] != SEED_SIZE:
+        raise ValueError(f"PRF seed is {SEED_SIZE} bytes, got {s.shape[-1]}")
     b = fnp.asarray(nonce).astype(np.uint8)
     lead = fnp.broadcast_shapes(s.shape[:-1], b.shape)
     message = fnp.concatenate(
