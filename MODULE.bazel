@@ -30,7 +30,7 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "hash_frx", version = "0.0.0")
 git_override(
     module_name = "hash_frx",
-    commit = "d30cba1b34c86440867c8e5e1d57d3315069455c",
+    commit = "e8e232291d9430c3532c9d4245289c83f6fd09dd",
     remote = "https://github.com/fractalyze/hash-frx.git",
 )
 
@@ -166,4 +166,65 @@ http_archive(
 """,
     sha256 = "f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023",
     urls = ["https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip"],
+)
+
+# C2SP's CCTV collection, which gates the §4.2.2 samplers. ACVP cannot: it
+# publishes `(d, z) -> (ek, dk)` and nothing between, so it gates `SampleNTT`
+# and `SamplePolyCBD` only as far as a whole key generation gates every step
+# inside it — which means not at all until K-PKE lands, and then only jointly.
+# CCTV's `intermediate/` files publish `ρ`, `σ`, the matrix `Â` and the secret
+# and error vectors as separate labelled values, so each sampler is pinned on
+# its own.
+#
+# One file per parameter set, and all three are needed rather than one: `η1` is
+# 3 for ML-KEM-512 and 2 for the other two, so a single file gates one of the
+# two centered-binomial widths and silently skips the other.
+CCTV_COMMIT = "1e3d2860d46e94e777e1b17c7a6f2436387e3ecc"
+
+http_file(
+    name = "cctv_ml_kem_intermediate_512",
+    downloaded_file_path = "ML-KEM-512.txt",
+    sha256 = "3cb7a5c2421d4ada68f61b9c26e6136a3436c320e0c016af7095dadb41217bf1",
+    urls = ["https://raw.githubusercontent.com/C2SP/CCTV/" + CCTV_COMMIT + "/ML-KEM/intermediate/ML-KEM-512.txt"],
+)
+
+http_file(
+    name = "cctv_ml_kem_intermediate_768",
+    downloaded_file_path = "ML-KEM-768.txt",
+    sha256 = "4cdeed48a917ec2825a49a03815c31692d51b4be0b6850a0abc56cb39bab1f84",
+    urls = ["https://raw.githubusercontent.com/C2SP/CCTV/" + CCTV_COMMIT + "/ML-KEM/intermediate/ML-KEM-768.txt"],
+)
+
+http_file(
+    name = "cctv_ml_kem_intermediate_1024",
+    downloaded_file_path = "ML-KEM-1024.txt",
+    sha256 = "af15ceb9c7129a152e0a9d66caabe0567b566b949bacfe8349c6a3c4b46cb64a",
+    urls = ["https://raw.githubusercontent.com/C2SP/CCTV/" + CCTV_COMMIT + "/ML-KEM/intermediate/ML-KEM-1024.txt"],
+)
+
+# The `unluckysample` sets: seeds found by search whose `SampleNTT` rejects far
+# more than average, needing 576 bytes of SHAKE128 where the mean is 315
+# candidates worth. They are the only published vectors that can tell a fixed
+# XOF budget is too small — every ordinary vector fits in three blocks, so a
+# three-block implementation passes the entire rest of the corpus and fails
+# here. See `sampling.py` for how the budget is chosen.
+http_file(
+    name = "cctv_ml_kem_unlucky_512",
+    downloaded_file_path = "ML-KEM-512.txt",
+    sha256 = "9d4e0ae011978a8f88a49b755ea6996a693428aaea0477c84331580c15b77a9b",
+    urls = ["https://raw.githubusercontent.com/C2SP/CCTV/" + CCTV_COMMIT + "/ML-KEM/unluckysample/ML-KEM-512.txt"],
+)
+
+http_file(
+    name = "cctv_ml_kem_unlucky_768",
+    downloaded_file_path = "ML-KEM-768.txt",
+    sha256 = "fede6f787581dc708e5c3337d7e49de33333d23023470668cd0588b65ad0ba90",
+    urls = ["https://raw.githubusercontent.com/C2SP/CCTV/" + CCTV_COMMIT + "/ML-KEM/unluckysample/ML-KEM-768.txt"],
+)
+
+http_file(
+    name = "cctv_ml_kem_unlucky_1024",
+    downloaded_file_path = "ML-KEM-1024.txt",
+    sha256 = "8da6cdb2fb0d4e2223dfa5229ec97d4ded7b93bd8b2202e9a7533850c817b8cd",
+    urls = ["https://raw.githubusercontent.com/C2SP/CCTV/" + CCTV_COMMIT + "/ML-KEM/unluckysample/ML-KEM-1024.txt"],
 )

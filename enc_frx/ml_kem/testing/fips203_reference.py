@@ -1,7 +1,7 @@
 # Copyright 2026 The enc-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""FIPS 203's NTT algorithms in plain Python integers — the oracle.
+"""FIPS 203's sampling, NTT and encoding algorithms in plain Python integers.
 
-Algorithms 9-12 transcribed, one coefficient at a time, no arrays and no
+Algorithms 5-12 transcribed, one coefficient at a time, no arrays and no
 vectorization. It exists to be *obviously* the specification, so a disagreement
 with the traced implementation is a bug in the traced implementation rather than
 a question about which convention either one meant.
@@ -13,10 +13,27 @@ standard's own `zeta = 17` and its `BitRev7` output order make it *this*
 transform, and those are exactly what a plausible-looking implementation gets
 wrong silently. Pinning against these functions is what catches that.
 
+The sampling algorithms are the same kind of trap for a different reason. Both
+read a byte stream as a bit stream, and both have a plausible wrong reading —
+`SampleNTT` can pack its two candidates out of the middle byte the other way
+round, and `SamplePolyCBD` can take its `2*eta` bits per coefficient in the wrong
+order — and *neither* wrong reading changes the output distribution. So a
+statistical check passes on both, and only equality with the standard separates
+them.
+
+`sample_ntt` here is written the way the standard writes it: a `while` that pulls
+from an unbounded stream until 256 coefficients are collected. That is exactly
+the control flow the traced implementation cannot have, which is the point — the
+oracle is the definition, and how the traced code reaches the same answer under a
+fixed budget is its own business.
+
 TEST ONLY. Never re-exported from the package.
 """
 
 from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterator
 
 Q = 3329
 N = 256
@@ -134,10 +151,110 @@ def byte_encode(f: list[int], d: int) -> list[int]:
     return [sum(bits[i * 8 + j] << j for j in range(8)) for i in range(len(bits) // 8)]
 
 
+def bytes_to_bits(b: list[int]) -> list[int]:
+    """Algorithm 4 — little-endian within a byte, so bit `8i + j` is bit `j` of
+    byte `i`.
+
+    The standard names this once and calls it from both `ByteDecode` and
+    `SamplePolyCBD`, so the transcription states it once too. Writing the
+    comprehension out at each caller would let the two drift into different bit
+    orders, which is the one mistake here that changes no distribution.
+    """
+    return [(byte >> j) & 1 for byte in b for j in range(8)]
+
+
 def byte_decode(b: list[int], d: int) -> list[int]:
     """Algorithm 6 — reduces mod q at d = 12, mod 2^d below it."""
-    bits = [(byte >> j) & 1 for byte in b for j in range(8)]
+    bits = bytes_to_bits(b)
     m = Q if d == 12 else (1 << d)
     return [
         sum(bits[i * d + j] << j for j in range(d)) % m for i in range(len(bits) // d)
+    ]
+
+
+# --- §4.2.2 sampling, Algorithms 7-8 ------------------------------------------
+#
+# Both read bytes as bits, and both have a plausible wrong reading that leaves
+# the output distribution unchanged — so a chi-squared test passes on the wrong
+# one and only equality with the standard separates them. That is what these
+# transcriptions are for.
+
+
+def shake128_stream(seed: bytes, chunk: int = 168) -> Iterator[int]:
+    """SHAKE128(`seed`) as an unbounded byte stream, one byte at a time.
+
+    Genuinely unbounded, which is what lets `sample_ntt` below be the standard's
+    `while` rather than a budgeted approximation of it. SHAKE's output is
+    prefix-consistent — `digest(n)` is the first `n` bytes of one stream — so
+    re-squeezing a longer digest and yielding the tail is the same stream. The
+    quadratic re-hashing that costs is irrelevant at these lengths and buys the
+    property the oracle exists to have.
+    """
+    taken = 0
+    while True:
+        taken += chunk
+        block = hashlib.shake_128(seed).digest(taken)
+        yield from block[taken - chunk :]
+
+
+def sample_ntt(stream: Iterator[int]) -> list[int]:
+    """Algorithm 7 — rejection sampling, straight from the standard.
+
+    Three bytes give two 12-bit candidates and each is kept iff it is below `q`,
+    so how many bytes this consumes depends on their values. The unbounded
+    `while` is the whole reason `sampling.py` cannot be a transcription of this:
+    a traced program has no data-dependent trip count.
+
+    The bit split of the middle byte is the trap. `d1` takes its **low** nibble
+    as the high bits and `d2` its **high** nibble as the low bits; swapping them
+    samples uniformly from the same range and produces a different, entirely
+    plausible array.
+
+    Returns coefficients already in the NTT domain — the name says `NTT` because
+    the output *is* `â`, not because a transform is applied here.
+    """
+    a_hat: list[int] = []
+    while len(a_hat) < N:
+        b0, b1, b2 = next(stream), next(stream), next(stream)
+        d1 = b0 + 256 * (b1 % 16)
+        d2 = (b1 // 16) + 16 * b2
+        if d1 < Q:
+            a_hat.append(d1)
+        if d2 < Q and len(a_hat) < N:
+            a_hat.append(d2)
+    return a_hat
+
+
+def sample_poly_cbd(b: list[int], eta: int) -> list[int]:
+    """Algorithm 8 — the centered binomial distribution, `eta` in {2, 3}.
+
+    No rejection: `64*eta` bytes in, 256 coefficients out. Each coefficient is
+    `x - y` where `x` and `y` count the set bits in two adjacent `eta`-bit
+    windows, so it lands in `[-eta, eta]` and is reduced mod `q`.
+
+    The bit order is little-endian *within a byte* — bit `8i + j` of the stream
+    is bit `j` of byte `i` — which `byte_decode` above reads the same way and
+    which is the reading a big-endian transcription gets wrong without changing
+    the distribution.
+    """
+    bits = bytes_to_bits(b)
+    f = []
+    for i in range(N):
+        x = sum(bits[2 * i * eta + j] for j in range(eta))
+        y = sum(bits[2 * i * eta + eta + j] for j in range(eta))
+        f.append((x - y) % Q)
+    return f
+
+
+def sample_matrix(rho: bytes, k: int) -> list[list[list[int]]]:
+    """`Â[i][j] = SampleNTT(rho ‖ j ‖ i)`, per Algorithms 13 and 14.
+
+    **The column index is absorbed first.** Both key generation and encryption
+    build the same `Â` this way and encryption then uses its transpose; deriving
+    `Â[i][j]` from `rho ‖ i ‖ j` instead produces that transpose, which is a
+    self-consistent scheme that fails every published vector and nothing else.
+    """
+    return [
+        [sample_ntt(shake128_stream(rho + bytes([j, i]))) for j in range(k)]
+        for i in range(k)
     ]

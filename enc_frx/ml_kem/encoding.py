@@ -48,8 +48,17 @@ from enc_frx.ml_kem.params import (
 WIDTHS = (1, 4, 5, 10, 11, 12)
 
 
-def _checked_length(value: ArrayLike, size: int, name: str) -> Array:
+def checked_length(value: ArrayLike, size: int, name: str) -> Array:
     """Pin a byte string's length at trace time, mirroring `AesGcm._checked`.
+
+    Public because `sampling.py` checks its seeds and its PRF output the same
+    way, and already depends on this module for the bit order. FIPS 203 fixes
+    every one of those lengths, so a copy per call site would be four chances to
+    word one rule differently.
+
+    It does not follow that every module should reach for it. `hashes.py` keeps
+    its own three-line check rather than take a dependency on the wire formats to
+    validate a seed, which is what `AesGcm._checked` does too.
 
     The type check of FIPS 203 §7.2/§7.3 is normative and sits at a different
     altitude from the modulus check below it: a length is static in a traced
@@ -109,7 +118,7 @@ def byte_encode(f: ArrayLike, d: int) -> Array:
 
 def _decode_raw(b: ArrayLike, d: int) -> Array:
     """The d-bit values the bytes carry, before any reduction."""
-    bits = _bytes_to_bits(b)
+    bits = bytes_to_bits(b)
     grouped = bits.reshape(*bits.shape[:-2], N, d)
     weights = np.int32(1) << np.arange(d, dtype=np.int32)
     return (grouped * weights).sum(axis=-1).astype(np.int32)
@@ -133,7 +142,13 @@ def _bits_to_bytes(bits: Array) -> Array:
     return (grouped * weights).sum(axis=-1).astype(np.uint8)
 
 
-def _bytes_to_bits(b: ArrayLike) -> Array:
+def bytes_to_bits(b: ArrayLike) -> Array:
+    """`[..., L]` bytes to `[..., L, 8]` bits, little-endian within a byte.
+
+    Public because `sampling.py` reads the same bit stream: FIPS 203 fixes one
+    bit order for the whole standard, so `SamplePolyCBD` and `ByteDecode` must
+    not each have their own reading of it.
+    """
     bi = _as_int(b)
     return (bi[..., None] >> fnp.arange(8, dtype=np.int32)) & np.int32(1)
 
@@ -164,7 +179,7 @@ def encode_ek(t_hat: ArrayLike, rho: ArrayLike) -> Array:
 
 def decode_ek(ek: ArrayLike, k: int) -> tuple[Array, Array]:
     """Inverse of `encode_ek`, returning `(t̂, ρ)`. Length-checked, §7.2."""
-    e = _checked_length(ek, encapsulation_key_size(k), "an encapsulation key")
+    e = checked_length(ek, encapsulation_key_size(k), "an encapsulation key")
     split = POLY_BYTES * k
     return decode_vector(e[..., :split], 12, k), e[..., split:]
 
@@ -182,7 +197,7 @@ def encode_ciphertext(u: ArrayLike, v: ArrayLike, du: int, dv: int) -> Array:
 
 def decode_ciphertext(c: ArrayLike, k: int, du: int, dv: int) -> tuple[Array, Array]:
     """Inverse of `encode_ciphertext`, decompressed back to `Z_q`."""
-    ci = _checked_length(c, ciphertext_size(k, du, dv), "a ciphertext")
+    ci = checked_length(c, ciphertext_size(k, du, dv), "a ciphertext")
     split = 32 * du * k
     return (
         decompress(decode_vector(ci[..., :split], du, k), du),
@@ -206,7 +221,7 @@ def encode_dk(dk_pke: ArrayLike, ek: ArrayLike, h_ek: ArrayLike, z: ArrayLike) -
 
 def decode_dk(dk: ArrayLike, k: int) -> tuple[Array, Array, Array, Array]:
     """Inverse of `encode_dk`, splitting at the four fixed offsets."""
-    parts = _checked_length(dk, decapsulation_key_size(k), "a decapsulation key")
+    parts = checked_length(dk, decapsulation_key_size(k), "a decapsulation key")
     pke_end = POLY_BYTES * k
     ek_end = pke_end + encapsulation_key_size(k)
     hash_end = ek_end + SEED_SIZE

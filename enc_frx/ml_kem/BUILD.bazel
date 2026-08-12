@@ -38,3 +38,37 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# The only target that names Keccak. Every scheme-level hash reaches it through
+# @hash_frx's ByteHash seam, so a second copy of SHA-3 cannot appear here.
+py_library(
+    name = "hashes",
+    srcs = [
+        "__init__.py",
+        "hashes.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":params",
+        "@hash_frx//hash_frx/keccak",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+py_library(
+    name = "sampling",
+    srcs = [
+        "__init__.py",
+        "sampling.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":encoding",
+        ":hashes",
+        ":ntt",
+        ":params",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
