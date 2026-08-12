@@ -270,7 +270,20 @@ def coefficients_are_reduced(b: ArrayLike) -> Array:
     `byte_decode` reduces mod `2^d` and re-encoding always reproduces the input,
     making the check a constant `True`.
 
+    Takes one polynomial or a whole encoded vector — §7.2 asks the question of
+    `ek`'s `t̂`, which is `k` of them — and reduces over both, so the result is
+    one boolean per batch entry either way. How many there are is the byte
+    length divided by `POLY_BYTES`, which is static at trace time.
+
     A value rather than an exception because the batch axis has no way to raise
     for entry 7 alone.
     """
-    return (_decode_raw(b, 12) < np.int32(Q)).all(axis=-1)
+    bi = fnp.asarray(b)
+    if bi.shape[-1] % POLY_BYTES:
+        raise ValueError(
+            f"a ByteEncode_12 value is a multiple of {POLY_BYTES} bytes, "
+            f"got {bi.shape[-1]}"
+        )
+    polynomials = bi.reshape(*bi.shape[:-1], bi.shape[-1] // POLY_BYTES, POLY_BYTES)
+    reduced = _decode_raw(polynomials, 12) < np.int32(Q)
+    return reduced.all(axis=-1).all(axis=-1)

@@ -93,3 +93,22 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# ML-KEM itself: the FO transform over K-PKE, and the only IND-CCA2 thing in the
+# package. Public, where `_k_pke` beneath it is not.
+py_library(
+    name = "ml_kem",
+    srcs = [
+        "__init__.py",
+        "ml_kem.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":_k_pke",
+        ":encoding",
+        ":hashes",
+        ":params",
+        "//enc_frx:kem",
+        requirement("frx"),
+    ],
+)

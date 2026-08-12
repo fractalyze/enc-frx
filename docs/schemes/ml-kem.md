@@ -83,6 +83,15 @@ makes no constant-time claim, and the items below are named rather than fixed.
 - **The caller owes randomness.** `encaps` takes it as an argument; nothing here
   samples it. The derandomized entry point the known-answer tests need lives
   below the seam.
+- **The caller owes the encapsulation-key check.** FIPS 203 §7.2 places it at key
+  import, and a seam whose keys are bytes on every call has no import step, so
+  `encaps` checks the length and nothing else — a length is static and can raise,
+  a coefficient's range is data and cannot. `MlKem.check_encapsulation_key` is
+  that check as a per-entry value, and a caller taking keys off a wire runs it
+  when the key arrives rather than per encapsulation. `decaps` owes the caller
+  nothing here: it holds the rejection seed, so it folds §7.2 and §7.3 into the
+  same reduction as the ciphertext comparison and a malformed key comes back as
+  a rejection secret.
 
 ## The gate
 
@@ -106,6 +115,20 @@ worst known — 384 candidates against a mean of 315, or 576 bytes. They are the
 only published vectors that can see a fixed XOF budget being too small, because
 every ordinary vector fits in three SHAKE128 blocks. An undersized implementation
 therefore passes the entire rest of the corpus and fails only here.
+
+### The one negative the files publish
+
+`intermediate/` also carries the whole of one encapsulation and its
+decapsulation — `ek`, `dk`, `m`, `c`, `K` — and one value past them: `KBar`, the
+implicit-rejection secret `J(z ‖ c)` for that same `c`. It is the only published
+value a correct rejection path produces and a broken one does not, and rejection
+is otherwise unobservable: without an oracle for the rejection secret, a
+wrong-but-different answer looks exactly like a correctly rejected one.
+
+Reaching it takes a *key* that fails a check rather than a corrupted ciphertext.
+`KBar` is derived from the file's own `c`, so changing `c` changes the expected
+answer along with it; changing `dk`'s `H(ek)` field fails the §7.3 hash check
+while leaving `z` and `c` alone, and lands on the published value exactly.
 
 ### One line the CCTV vectors cannot gate
 
