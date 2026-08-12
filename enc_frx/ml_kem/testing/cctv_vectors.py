@@ -1,18 +1,9 @@
 # Copyright 2026 The enc-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""Loader for C2SP's CCTV ML-KEM vectors, pinned in //MODULE.bazel.
+"""Loader for C2SP's CCTV ML-KEM vectors — `intermediate/` and `unluckysample/`.
 
-Two sets, and each answers something ACVP cannot.
-
-**`intermediate/`** publishes every value inside one key generation and one
-encapsulation as a labelled line — `ρ`, `σ`, the matrix `A`, the secret and error
-vectors — where ACVP publishes `(d, z) -> (ek, dk)` and nothing between. So the
-samplers are pinned individually rather than only as far as a whole key
-generation pins each step inside it.
-
-**`unluckysample/`** publishes seeds found by search whose `SampleNTT` rejects
-far more than average. They are the only published vectors that can see a fixed
-XOF budget being too small: every ordinary vector fits in three SHAKE128 blocks,
-so an undersized implementation passes the entire rest of the corpus.
+Why these sets rather than ACVP's, and why all three parameter sets, is stated
+once where they are pinned: [`//MODULE.bazel`](../../../MODULE.bazel). This
+module is the parser.
 
 The file format is ` = `-separated, and **a line is not a pair.** The first
 segment is the name and every later one is another way of writing the same

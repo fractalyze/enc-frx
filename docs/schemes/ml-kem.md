@@ -18,38 +18,16 @@ loops are unrolled, and — the one choice with a security argument attached —
 
 ### The fixed XOF block
 
-`SampleNTT` is rejection sampling. Three SHAKE128 bytes give two 12-bit
-candidates, each kept iff it is below `q`, until 256 coefficients are collected.
-How many bytes that consumes depends on the bytes themselves, and **a traced
-program has no data-dependent trip count** — so the standard's `while` cannot be
-transcribed. It is replaced by a fixed squeeze, masked and compacted.
+`SampleNTT` is rejection sampling, so the bytes it consumes depend on their own
+values, and **a traced program has no data-dependent trip count** — the
+standard's `while` cannot be transcribed. It is replaced by a fixed squeeze of
+five SHAKE128 blocks, masked and compacted, which leaves a `2^-261` chance of
+the budget being too small.
 
-The budget comes from the tail of the acceptance distribution, not its mean.
-Acceptance is `3329/4096 ~ 0.8127`, so 256 coefficients need ~315 candidates on
-average and a budget sized from that would fail constantly:
-
-| SHAKE128 blocks | bytes | candidates | `P(budget too small)` |
-| --------------- | ----- | ---------- | --------------------- |
-| 3               | 504   | 336        | `2^-6.9`              |
-| 4               | 672   | 448        | `2^-105`              |
-| **5**           | **840** | **560**  | **`2^-261`**          |
-
-Five blocks, because that puts a miss below `2^-256` rather than merely below
-`2^-128` — under the bar for ML-KEM-1024's category-5 claim and not only for the
-smallest parameter set. The margin over four blocks costs one Keccak-f
-permutation per matrix entry.
-
-**A miss is deterministic rather than undefined.** Below 256 acceptances every
-unfilled slot reads the final candidate and the result is a wrong array — the
-same wrong array on every backend, because the compaction clamps its own index
-instead of leaving the gather's out-of-bounds behaviour to XLA. That behaviour is
-not the intuitive one and is worth not depending on: an unclamped gather fills
-with `INT32_MIN` rather than saturating.
-
-Nothing detects the miss and nothing should: threading a validity flag for a
-`2^-261` event through the whole scheme would put a failure channel into
-`Kem.decaps`, which must not have one — implicit rejection requires a wrong
-ciphertext to yield a different shared secret rather than an error.
+See [`sampling.py`](../../enc_frx/ml_kem/sampling.py) for where that number
+comes from: the per-block tail table, why five rather than four, and why a miss
+is a deterministic wrong answer rather than an error. What follows here is the
+part the module cannot state about itself.
 
 ### Why a fixed budget is defensible here and would not be everywhere
 
@@ -76,12 +54,9 @@ Everything is batch-first over leading axes; there is no scalar entry point.
 - **The matrix expansion** issues all `k^2` `SampleNTT` calls as one XOF batch.
   The entries share nothing but the seed prefix, so the only thing that would
   serialize them is writing the loop.
-- **The samplers' compaction is a gather.** Selecting accepted candidates in
-  order is a stream compaction, and the natural form — scatter each value to its
-  rank — is the wrong one: XLA serializes a large scatter on GPU. The inverse is
-  a `searchsorted` over the running acceptance count followed by a
-  `take_along_axis`, which is a gather, with the binary search unrolled so its
-  trip count is static too.
+- **The samplers' compaction is a gather, not a scatter**, because XLA
+  serializes a large scatter on GPU — see
+  [`sampling.py`](../../enc_frx/ml_kem/sampling.py) for the construction.
 - **Sequential within a message:** nothing. ML-KEM has no Horner chain, which is
   what separates it from Poly1305 and GHASH.
 
@@ -107,15 +82,7 @@ makes no constant-time claim, and the items below are named rather than fixed.
 
 ## Gating
 
-The samplers are pinned against C2SP's CCTV vectors rather than against ACVP
-alone, because ACVP publishes `(d, z) -> (ek, dk)` and nothing between: it gates
-each sampler only as far as a whole key generation gates every step inside it.
-CCTV's `intermediate/` files publish `rho`, `sigma`, `A`, `s`, `e`, `r`, `e1` and
-`e2` as separate labelled values, so each sampler is pinned on its own. All three
-parameter sets are loaded because `eta1` is 3 for ML-KEM-512 and 2 for the other
-two, so one file gates one of the two centered-binomial widths.
-
-CCTV's `unluckysample/` seeds gate the XOF budget, and nothing else does. They
-are the worst rejection runs known — 384 candidates against a mean of 315, or 576
-bytes — so a three-block implementation passes every other published vector and
-fails only there.
+The samplers are pinned against C2SP's CCTV vectors rather than ACVP alone,
+because ACVP publishes `(d, z) -> (ek, dk)` and nothing between — it cannot pin a
+sampler on its own. The rationale for each set, and why all three parameter sets
+are needed, is at its declaration in [`MODULE.bazel`](../../MODULE.bazel).

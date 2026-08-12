@@ -74,7 +74,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from enc_frx.ml_kem import hashes
-from enc_frx.ml_kem.encoding import bytes_to_bits
+from enc_frx.ml_kem.encoding import bytes_to_bits, checked_length
 from enc_frx.ml_kem.ntt import as_field
 from enc_frx.ml_kem.params import SEED_SIZE, N, Q
 
@@ -101,7 +101,9 @@ def _candidates(stream: Array) -> Array:
     nibble as low bits. Swapping them still samples uniformly from `[0, 2^12)`,
     so the output stays plausible and every statistical check still passes.
     """
-    groups = stream.astype(np.int32).reshape(*stream.shape[:-1], GROUPS, 3)
+    groups = stream.astype(np.int32).reshape(
+        *stream.shape[:-1], GROUPS, BYTES_PER_GROUP
+    )
     b0, b1, b2 = groups[..., 0], groups[..., 1], groups[..., 2]
     d1 = b0 + np.int32(256) * (b1 & np.int32(0x0F))
     d2 = (b1 >> np.int32(4)) + np.int32(16) * b2
@@ -140,12 +142,9 @@ def sample_ntt(seeds: ArrayLike) -> Array:
     not a transform applied here — so it comes back as field elements ready for
     `base_mul`, never as integers needing a later crossing.
     """
-    seed_array = fnp.asarray(seeds).astype(np.uint8)
-    if seed_array.shape[-1] != MATRIX_SEED_SIZE:
-        raise ValueError(
-            f"SampleNTT seed is {MATRIX_SEED_SIZE} bytes "
-            f"(rho ‖ j ‖ i), got {seed_array.shape[-1]}"
-        )
+    seed_array = checked_length(
+        seeds, MATRIX_SEED_SIZE, "a SampleNTT seed (rho ‖ j ‖ i)"
+    )
     lead = seed_array.shape[:-1]
     stream = hashes.xof(XOF_BYTES, seed_array.reshape(-1, MATRIX_SEED_SIZE))
     coefficients = _compact(_candidates(stream))
@@ -164,9 +163,7 @@ def expand_matrix(rho: ArrayLike, k: int) -> Array:
     share nothing but the seed prefix, so the only thing that would serialize
     them is writing the loop.
     """
-    seed = fnp.asarray(rho).astype(np.uint8)
-    if seed.shape[-1] != SEED_SIZE:
-        raise ValueError(f"rho is {SEED_SIZE} bytes, got {seed.shape[-1]}")
+    seed = checked_length(rho, SEED_SIZE, "rho")
     lead = seed.shape[:-1]
     # `indices[i, j] = (j, i)`, the standard's order, built on the host because
     # `k` is static.
@@ -196,12 +193,9 @@ def sample_poly_cbd(data: ArrayLike, eta: int) -> Array:
     """
     if eta not in hashes.ETAS:
         raise ValueError(f"FIPS 203 uses eta in {hashes.ETAS}, got {eta}")
-    array = fnp.asarray(data).astype(np.uint8)
-    expected = hashes.CBD_BYTES_PER_ETA * eta
-    if array.shape[-1] != expected:
-        raise ValueError(
-            f"SamplePolyCBD_{eta} takes {expected} bytes, got {array.shape[-1]}"
-        )
+    array = checked_length(
+        data, hashes.CBD_BYTES_PER_ETA * eta, f"SamplePolyCBD_{eta} input"
+    )
     bits = bytes_to_bits(array)
     windows = bits.reshape(*array.shape[:-1], N, 2, eta)
     counts = windows.sum(axis=-1)

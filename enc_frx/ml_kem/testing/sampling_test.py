@@ -1,22 +1,17 @@
 # Copyright 2026 The enc-frx Authors. SPDX-License-Identifier: Apache-2.0
 """The §4.2.2 samplers, against the standard's own intermediate values.
 
-Three gates, and they catch different things.
+Three gates, and what makes them worth having together is that they fail on
+different things:
 
-**CCTV's `intermediate/` files** are the primary one. They publish `ρ`, `σ` and
-the resulting `A`, `s`, `e`, `r`, `e1` and `e2` as separate labelled values, so
-each sampler is pinned on its own rather than jointly through a key generation
-that has not been written yet. All three parameter sets are loaded because `η1`
-is 3 for ML-KEM-512 and 2 for the other two — one file gates one width.
+- **CCTV's `intermediate/` files** pin each sampler against a published value.
+- **CCTV's `unluckysample/` seeds** pin the XOF budget, which nothing else can.
+- **The reference oracle** sweeps random seeds, where the published vectors are
+  a handful of points a bug can sit between. It is also the only gate that is
+  *obviously* the standard, so a disagreement localizes.
 
-**CCTV's `unluckysample/` seeds** gate the fixed XOF budget, and nothing else
-does. They are the worst rejection runs known, at 384 candidates against a mean
-of 315, and a three-block implementation passes every other vector in this file
-and fails only here.
-
-**The reference oracle** sweeps random seeds, which the published vectors cannot:
-there are a handful of those and a bug can sit between them. It is also the only
-gate that is *obviously* the standard, so a disagreement localizes.
+Why those vector sets and not ACVP's is stated at their declaration in
+[`//MODULE.bazel`](../../../MODULE.bazel).
 
 What none of them catch is the thing the module's shape exists for, so it is
 asserted directly: that the traced path has no data-dependent control flow.
@@ -24,6 +19,7 @@ asserted directly: that the traced path has no data-dependent control flow.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 
 import frx
@@ -46,6 +42,12 @@ _PARAMETER_SETS = (
     ("ML-KEM-1024", 4, 2, 2),
 )
 
+# The same rows with the name repeated as the absl case label. Hoisted rather
+# than spelled out at each `named_parameters`, where four hand-kept copies of
+# one projection would have to stay identical.
+_NAMED = tuple((row[0], *row) for row in _PARAMETER_SETS)
+_NAMES = tuple((row[0], row[0]) for row in _PARAMETER_SETS)
+
 
 def _path(repo: str, name: str) -> str:
     location = runfiles.Create().Rlocation(f"{repo}/file/{name}")
@@ -53,10 +55,35 @@ def _path(repo: str, name: str) -> str:
     return location
 
 
+@functools.lru_cache(maxsize=None)
 def _intermediate(parameter_set: str) -> cctv_vectors.Intermediate:
+    """Cached: five tests read ML-KEM-512's file, and parsing it is pure."""
     bits = parameter_set.split("-")[-1]
     return cctv_vectors.load_intermediate(
         _path(f"cctv_ml_kem_intermediate_{bits}", f"ML-KEM-{bits}.txt")
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _unlucky_seeds(parameter_set: str) -> tuple[bytes, ...]:
+    bits = parameter_set.split("-")[-1]
+    return tuple(
+        cctv_vectors.load_unlucky_seeds(
+            _path(f"cctv_ml_kem_unlucky_{bits}", f"ML-KEM-{bits}.txt")
+        )
+    )
+
+
+def _xof_seeds(seeds: tuple[bytes, ...]) -> np.ndarray:
+    """`d` seeds to the `[n, 34]` batch `sample_ntt` takes.
+
+    `rho` is the first half of `G(d)`, taken from `hashlib` rather than from
+    `hashes.g` so these gate the sampler alone. Stacked into one batch because
+    a Python loop over the batch axis is what this repo treats as the bug.
+    """
+    return np.array(
+        [list(hashlib.sha3_512(seed).digest()[:32]) + [0, 0] for seed in seeds],
+        dtype=np.uint8,
     )
 
 
@@ -67,7 +94,7 @@ def _decode_vector(packed: bytes) -> np.ndarray:
 
 
 class SampleNttTest(parameterized.TestCase):
-    @parameterized.named_parameters(*[(p[0], *p) for p in _PARAMETER_SETS])
+    @parameterized.named_parameters(*_NAMED)
     def test_matrix_matches_the_published_intermediate_value(
         self, parameter_set: str, k: int, _eta1: int, _eta2: int
     ) -> None:
@@ -78,7 +105,7 @@ class SampleNttTest(parameterized.TestCase):
         got = as_ints(sampling.expand_matrix(np.frombuffer(rho, dtype=np.uint8), k))
         np.testing.assert_array_equal(np.asarray(got), want)
 
-    @parameterized.named_parameters(*[(p[0], *p) for p in _PARAMETER_SETS])
+    @parameterized.named_parameters(*_NAMED)
     def test_the_first_entry_matches_the_published_coefficients(
         self, parameter_set: str, k: int, _eta1: int, _eta2: int
     ) -> None:
@@ -132,46 +159,31 @@ class SampleNttTest(parameterized.TestCase):
 class UnluckySeedTest(parameterized.TestCase):
     """The vectors that see an undersized XOF budget, and nothing else does."""
 
-    @parameterized.named_parameters(*[(p[0], p[0]) for p in _PARAMETER_SETS])
+    @parameterized.named_parameters(*_NAMES)
     def test_the_worst_known_rejection_runs_still_fit(self, parameter_set: str) -> None:
-        bits = parameter_set.split("-")[-1]
-        seeds = cctv_vectors.load_unlucky_seeds(
-            _path(f"cctv_ml_kem_unlucky_{bits}", f"ML-KEM-{bits}.txt")
-        )
+        seeds = _unlucky_seeds(parameter_set)
         self.assertNotEmpty(seeds)
-        for seed in seeds:
-            # `rho` is the first half of `G(d)`; taken from `hashlib` rather than
-            # from `hashes.g` so this gates the sampler alone.
+        got = np.asarray(as_ints(sampling.sample_ntt(_xof_seeds(seeds))))
+        for row, seed in enumerate(seeds):
             rho = hashlib.sha3_512(seed).digest()[:32]
-            xof_seed = np.frombuffer(rho + bytes([0, 0]), dtype=np.uint8)[None, :]
-            got = np.asarray(as_ints(sampling.sample_ntt(xof_seed)))[0]
             want = ref.sample_ntt(ref.shake128_stream(rho + bytes([0, 0])))
-            np.testing.assert_array_equal(got, np.array(want), err_msg=seed.hex())
+            np.testing.assert_array_equal(got[row], np.array(want), err_msg=seed.hex())
 
     def test_the_budget_covers_the_worst_known_run_with_headroom(self) -> None:
         # States the margin as a number rather than leaving it to the pass above,
         # so shrinking the budget fails here with the reason attached.
-        seeds = cctv_vectors.load_unlucky_seeds(
-            _path("cctv_ml_kem_unlucky_512", "ML-KEM-512.txt")
-        )
-        worst = 0
-        for seed in seeds:
-            rho = hashlib.sha3_512(seed).digest()[:32]
-            stream = np.asarray(
-                hashes.xof(
-                    sampling.XOF_BYTES,
-                    np.frombuffer(rho + bytes([0, 0]), dtype=np.uint8)[None, :],
-                )
-            )[0].astype(np.int64)
-            groups = stream[: sampling.GROUPS * 3].reshape(sampling.GROUPS, 3)
-            d1 = groups[:, 0] + 256 * (groups[:, 1] % 16)
-            d2 = (groups[:, 1] // 16) + 16 * groups[:, 2]
-            candidates = np.stack([d1, d2], axis=-1).reshape(-1)
-            accepted = np.cumsum(candidates < ref.Q)
-            worst = max(worst, int(np.argmax(accepted >= N)) + 1)
+        #
+        # Driven through `sampling._candidates` rather than a hand-copied bit
+        # split: this test measures the margin, and independence from the
+        # production reading is already `fips203_reference`'s job above.
+        seeds = _unlucky_seeds("ML-KEM-512")
+        stream = hashes.xof(sampling.XOF_BYTES, _xof_seeds(seeds))
+        candidates = np.asarray(sampling._candidates(stream))
+        accepted = np.cumsum(candidates < ref.Q, axis=-1)
+        consumed = np.argmax(accepted >= N, axis=-1) + 1
         # C2SP's generator reports 384 candidates as the worst it found.
-        self.assertEqual(worst, 384)
-        self.assertLess(worst, sampling.CANDIDATES)
+        self.assertEqual(int(consumed.max()), 384)
+        self.assertLess(int(consumed.max()), sampling.CANDIDATES)
 
 
 class BudgetMissTest(absltest.TestCase):
@@ -187,7 +199,7 @@ class BudgetMissTest(absltest.TestCase):
     def _starved(self) -> fnp.ndarray:
         # Three acceptances in a stream of 560; every other value is above q.
         candidates = fnp.full((1, sampling.CANDIDATES), 4000, dtype=fnp.int32)
-        return candidates.at[0, 0].set(11).at[0, 5].set(22).at[0, 9].set(33)
+        return candidates.at[0, [0, 5, 9]].set(fnp.asarray([11, 22, 33]))
 
     def test_the_accepted_prefix_is_still_correct(self) -> None:
         got = np.asarray(sampling._compact(self._starved()))[0]
@@ -210,7 +222,7 @@ class BudgetMissTest(absltest.TestCase):
 
 
 class SamplePolyCbdTest(parameterized.TestCase):
-    @parameterized.named_parameters(*[(p[0], *p) for p in _PARAMETER_SETS])
+    @parameterized.named_parameters(*_NAMED)
     def test_key_generation_vectors_match(
         self, parameter_set: str, k: int, eta1: int, _eta2: int
     ) -> None:
@@ -225,7 +237,7 @@ class SamplePolyCbdTest(parameterized.TestCase):
         np.testing.assert_array_equal(got[:k], _decode_vector(vectors.hex_at("s")))
         np.testing.assert_array_equal(got[k:], _decode_vector(vectors.hex_at("e")))
 
-    @parameterized.named_parameters(*[(p[0], *p) for p in _PARAMETER_SETS])
+    @parameterized.named_parameters(*_NAMED)
     def test_encryption_vectors_match_at_both_etas(
         self, parameter_set: str, k: int, eta1: int, eta2: int
     ) -> None:

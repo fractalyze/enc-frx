@@ -49,6 +49,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":encoding",
         ":params",
         "@hash_frx//hash_frx/keccak",
         requirement("frx"),

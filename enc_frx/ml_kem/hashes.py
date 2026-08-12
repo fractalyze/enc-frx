@@ -33,6 +33,7 @@ from hash_frx.keccak.byte_hashes import (
     Shake256,
 )
 
+from enc_frx.ml_kem.encoding import checked_length
 from enc_frx.ml_kem.params import SEED_SIZE
 
 # Re-exported rather than restated: `sampling.py` sizes its XOF budget in whole
@@ -45,18 +46,17 @@ CBD_BYTES_PER_ETA = 64
 ETAS = (2, 3)
 
 
-def _flat(data: ArrayLike) -> tuple[Array, tuple[int, ...]]:
-    """`[..., L]` bytes to the `[B, L]` the seam takes, plus the axes to restore."""
+def _digest(hash_: Sha3_256 | Sha3_512 | Shake128 | Shake256, data: ArrayLike) -> Array:
+    """Run one `ByteHash` over `[..., L]` bytes, restoring the leading axes.
+
+    The seam is strictly `[B, L] -> [B, digest_size]`, so the flatten and the
+    restore around it are the whole adapter every function in this module needs.
+    """
     array = fnp.asarray(data).astype(np.uint8)
     if array.ndim == 0:
         raise ValueError("expected at least one byte axis")
     lead = array.shape[:-1]
-    return array.reshape(-1, array.shape[-1]), lead
-
-
-def _digest(hash_: Sha3_256 | Sha3_512 | Shake128 | Shake256, data: ArrayLike) -> Array:
-    rows, lead = _flat(data)
-    out = fnp.asarray(hash_.digest(rows), dtype=fnp.uint8)
+    out = fnp.asarray(hash_.digest(array.reshape(-1, array.shape[-1])), dtype=fnp.uint8)
     return out.reshape(*lead, out.shape[-1])
 
 
@@ -96,9 +96,7 @@ def prf(eta: int, seed: ArrayLike, nonce: ArrayLike) -> Array:
     """
     if eta not in ETAS:
         raise ValueError(f"FIPS 203 uses eta in {ETAS}, got {eta}")
-    s = fnp.asarray(seed).astype(np.uint8)
-    if s.shape[-1] != SEED_SIZE:
-        raise ValueError(f"PRF seed is {SEED_SIZE} bytes, got {s.shape[-1]}")
+    s = checked_length(seed, SEED_SIZE, "a PRF seed")
     b = fnp.asarray(nonce).astype(np.uint8)
     lead = fnp.broadcast_shapes(s.shape[:-1], b.shape)
     message = fnp.concatenate(

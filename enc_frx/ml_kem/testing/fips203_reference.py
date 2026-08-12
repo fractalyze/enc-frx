@@ -151,9 +151,21 @@ def byte_encode(f: list[int], d: int) -> list[int]:
     return [sum(bits[i * 8 + j] << j for j in range(8)) for i in range(len(bits) // 8)]
 
 
+def bytes_to_bits(b: list[int]) -> list[int]:
+    """Algorithm 4 — little-endian within a byte, so bit `8i + j` is bit `j` of
+    byte `i`.
+
+    The standard names this once and calls it from both `ByteDecode` and
+    `SamplePolyCBD`, so the transcription states it once too. Writing the
+    comprehension out at each caller would let the two drift into different bit
+    orders, which is the one mistake here that changes no distribution.
+    """
+    return [(byte >> j) & 1 for byte in b for j in range(8)]
+
+
 def byte_decode(b: list[int], d: int) -> list[int]:
     """Algorithm 6 — reduces mod q at d = 12, mod 2^d below it."""
-    bits = [(byte >> j) & 1 for byte in b for j in range(8)]
+    bits = bytes_to_bits(b)
     m = Q if d == 12 else (1 << d)
     return [
         sum(bits[i * d + j] << j for j in range(d)) % m for i in range(len(bits) // d)
@@ -225,7 +237,7 @@ def sample_poly_cbd(b: list[int], eta: int) -> list[int]:
     which is the reading a big-endian transcription gets wrong without changing
     the distribution.
     """
-    bits = [(byte >> j) & 1 for byte in b for j in range(8)]
+    bits = bytes_to_bits(b)
     f = []
     for i in range(N):
         x = sum(bits[2 * i * eta + j] for j in range(eta))
