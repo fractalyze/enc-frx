@@ -54,6 +54,10 @@ Everything is batch-first over leading axes; there is no scalar entry point.
 - **The matrix expansion** issues all `k^2` `SampleNTT` calls as one XOF batch.
   The entries share nothing but the seed prefix, so the only thing that would
   serialize them is writing the loop.
+- **K-PKE's matrix-vector products** are one `base_mul` over a broadcast pair and
+  one sum over the column axis, for any `k` — see
+  [`k_pke.py`](../../enc_frx/ml_kem/k_pke.py). Writing `Â ∘ ŝ` as a loop over the
+  rows would issue `k` of each and serialize work that shares nothing.
 - **The samplers' compaction is a gather, not a scatter**, because XLA
   serializes a large scatter on GPU — see
   [`sampling.py`](../../enc_frx/ml_kem/sampling.py) for the construction.
@@ -102,3 +106,19 @@ worst known — 384 candidates against a mean of 315, or 576 bytes. They are the
 only published vectors that can see a fixed XOF budget being too small, because
 every ordinary vector fits in three SHAKE128 blocks. An undersized implementation
 therefore passes the entire rest of the corpus and fails only here.
+
+### One line the CCTV vectors cannot gate
+
+Both sets predate the final standard in exactly one place: they expand
+`(ρ, σ) ← G(d)`, where FIPS 203 Algorithm 13 line 1 is `G(d ‖ k)`. The
+parameter-set byte binds a key to the `k` it was generated under, and it is the
+one thing about key generation no vector loaded here can see — every value the
+files publish begins at `ρ` and `σ`, and everything from there on matches the
+final standard, the `SampleNTT` index order included.
+
+So key generation is gated in two pieces rather than one: the lattice work
+against the vectors, entering below the expansion, and the expansion itself
+against `hashlib`, which is where SHA-3 is established for this repo anyway. The
+arrangement is worth knowing before reading either test, because the wrong repair
+is available and looks right — feeding the files' `d` to `key_gen` fails, and the
+standard-conforming code is what appears to be at fault.

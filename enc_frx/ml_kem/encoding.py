@@ -39,6 +39,7 @@ from enc_frx.ml_kem.params import (
     Q,
     ciphertext_size,
     decapsulation_key_size,
+    decryption_key_size,
     encapsulation_key_size,
 )
 
@@ -222,7 +223,7 @@ def encode_dk(dk_pke: ArrayLike, ek: ArrayLike, h_ek: ArrayLike, z: ArrayLike) -
 def decode_dk(dk: ArrayLike, k: int) -> tuple[Array, Array, Array, Array]:
     """Inverse of `encode_dk`, splitting at the four fixed offsets."""
     parts = checked_length(dk, decapsulation_key_size(k), "a decapsulation key")
-    pke_end = POLY_BYTES * k
+    pke_end = decryption_key_size(k)
     ek_end = pke_end + encapsulation_key_size(k)
     hash_end = ek_end + SEED_SIZE
     return (

@@ -72,3 +72,24 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# Not public: K-PKE is IND-CPA only, so only ML-KEM itself and this package's
+# tests may depend on it. What that does and does not fence is in `k_pke.py`'s
+# module docstring.
+py_library(
+    name = "k_pke",
+    srcs = [
+        "__init__.py",
+        "k_pke.py",
+    ],
+    visibility = ["//enc_frx/ml_kem:__subpackages__"],
+    deps = [
+        ":encoding",
+        ":hashes",
+        ":ntt",
+        ":params",
+        ":sampling",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

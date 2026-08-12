@@ -26,10 +26,8 @@ import frx
 import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
-from python.runfiles import runfiles
 
 from enc_frx.ml_kem import hashes, sampling
-from enc_frx.ml_kem.encoding import decode_vector
 from enc_frx.ml_kem.ntt import as_ints
 from enc_frx.ml_kem.params import N
 from enc_frx.ml_kem.testing import cctv_vectors
@@ -46,35 +44,6 @@ _PARAMETER_SETS = (
 # four `named_parameters` decorators would otherwise carry hand-kept copies of
 # one projection.
 _NAMED = tuple((row[0], *row) for row in _PARAMETER_SETS)
-
-
-def _path(repo: str, name: str) -> str:
-    location = runfiles.Create().Rlocation(f"{repo}/file/{name}")
-    assert location is not None, f"{repo} not in runfiles"
-    return location
-
-
-def _cctv_path(kind: str, parameter_set: str) -> str:
-    """A CCTV vector file: both sets name their files by the parameter set."""
-    bits = parameter_set.split("-")[-1]
-    return _path(f"cctv_ml_kem_{kind}_{bits}", f"ML-KEM-{bits}.txt")
-
-
-@functools.lru_cache(maxsize=None)
-def _intermediate(parameter_set: str) -> cctv_vectors.Intermediate:
-    """Cached: five tests read ML-KEM-512's file, and parsing it is pure."""
-    return cctv_vectors.load_intermediate(_cctv_path("intermediate", parameter_set))
-
-
-@functools.lru_cache(maxsize=None)
-def _unlucky_seeds(parameter_set: str) -> tuple[bytes, ...]:
-    """Cached: both `UnluckySeedTest` methods read the same file.
-
-    A tuple rather than the loader's list because the value is shared across
-    callers once cached, and a mutable one could be edited out from under the
-    next reader.
-    """
-    return tuple(cctv_vectors.load_unlucky_seeds(_cctv_path("unlucky", parameter_set)))
 
 
 def _xof_seeds(seeds: tuple[bytes, ...]) -> np.ndarray:
@@ -102,21 +71,15 @@ def _sample_ntt_lowering() -> str:
     return str(frx.jit(sampling.sample_ntt).lower(seeds).as_text())
 
 
-def _decode_vector(packed: bytes, k: int) -> np.ndarray:
-    """ByteEncode_12 of `k` polynomials back to `[k, 256]` integers."""
-    return np.asarray(decode_vector(np.frombuffer(packed, dtype=np.uint8), 12, k))
-
-
 class SampleNttTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_matrix_matches_the_published_intermediate_value(
         self, parameter_set: str, k: int, _eta1: int, _eta2: int
     ) -> None:
-        vectors = _intermediate(parameter_set)
-        rho = vectors.hex_at("ρ")
-        want = _decode_vector(vectors.hex_at("A"), k * k).reshape(k, k, N)
+        vectors = cctv_vectors.intermediate(parameter_set)
+        want = cctv_vectors.decode_polys(vectors.hex_at("A"), k * k).reshape(k, k, N)
 
-        got = as_ints(sampling.expand_matrix(np.frombuffer(rho, dtype=np.uint8), k))
+        got = as_ints(sampling.expand_matrix(vectors.array_at("ρ"), k))
         np.testing.assert_array_equal(np.asarray(got), want)
 
     @parameterized.named_parameters(*_NAMED)
@@ -126,8 +89,8 @@ class SampleNttTest(parameterized.TestCase):
         # `A[0, 0]` is published as decimals as well as inside the packed `A`, so
         # this is the one check that does not route through `byte_decode` — a
         # decoder bug cannot make both pass.
-        vectors = _intermediate(parameter_set)
-        rho = np.frombuffer(vectors.hex_at("ρ"), dtype=np.uint8)
+        vectors = cctv_vectors.intermediate(parameter_set)
+        rho = vectors.array_at("ρ")
         got = as_ints(sampling.expand_matrix(rho, k))
         np.testing.assert_array_equal(
             np.asarray(got)[0, 0], np.array(vectors.ints_at("A[0, 0]"))
@@ -138,8 +101,8 @@ class SampleNttTest(parameterized.TestCase):
         # self-consistent scheme, so only a published vector separates them —
         # this asserts the matrix is not symmetric, which is what makes the
         # vector check above able to tell.
-        vectors = _intermediate("ML-KEM-512")
-        rho = np.frombuffer(vectors.hex_at("ρ"), dtype=np.uint8)
+        vectors = cctv_vectors.intermediate("ML-KEM-512")
+        rho = vectors.array_at("ρ")
         got = np.asarray(as_ints(sampling.expand_matrix(rho, 2)))
         self.assertFalse(np.array_equal(got[0, 1], got[1, 0]))
 
@@ -173,7 +136,7 @@ class UnluckySeedTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*((r[0], r[0]) for r in _PARAMETER_SETS))
     def test_the_worst_known_rejection_runs_still_fit(self, parameter_set: str) -> None:
-        seeds = _unlucky_seeds(parameter_set)
+        seeds = cctv_vectors.unlucky_seeds(parameter_set)
         self.assertNotEmpty(seeds)
         got = np.asarray(as_ints(sampling.sample_ntt(_xof_seeds(seeds))))
         for row, seed in enumerate(seeds):
@@ -188,7 +151,7 @@ class UnluckySeedTest(parameterized.TestCase):
         # Driven through `sampling._candidates` rather than a hand-copied bit
         # split: this test measures the margin, and independence from the
         # production reading is already `fips203_reference`'s job above.
-        seeds = _unlucky_seeds("ML-KEM-512")
+        seeds = cctv_vectors.unlucky_seeds("ML-KEM-512")
         stream = hashes.xof(sampling.XOF_BYTES, _xof_seeds(seeds))
         candidates = np.asarray(sampling._candidates(stream))
         accepted = np.cumsum(candidates < ref.Q, axis=-1)
@@ -240,14 +203,18 @@ class SamplePolyCbdTest(parameterized.TestCase):
     ) -> None:
         # Algorithm 13: `s` takes nonces 0..k-1 and `e` takes k..2k-1, both at
         # eta1, both from sigma.
-        vectors = _intermediate(parameter_set)
-        sigma = np.frombuffer(vectors.hex_at("σ"), dtype=np.uint8)
+        vectors = cctv_vectors.intermediate(parameter_set)
+        sigma = vectors.array_at("σ")
         nonces = np.arange(2 * k, dtype=np.uint8)
         got = np.asarray(
             as_ints(sampling.sample_poly_cbd(hashes.prf(eta1, sigma, nonces), eta1))
         )
-        np.testing.assert_array_equal(got[:k], _decode_vector(vectors.hex_at("s"), k))
-        np.testing.assert_array_equal(got[k:], _decode_vector(vectors.hex_at("e"), k))
+        np.testing.assert_array_equal(
+            got[:k], cctv_vectors.decode_polys(vectors.hex_at("s"), k)
+        )
+        np.testing.assert_array_equal(
+            got[k:], cctv_vectors.decode_polys(vectors.hex_at("e"), k)
+        )
 
     @parameterized.named_parameters(*_NAMED)
     def test_encryption_vectors_match_at_both_etas(
@@ -257,14 +224,14 @@ class SamplePolyCbdTest(parameterized.TestCase):
         # and `e2` takes 2k, both at eta2. The two widths and the nonce that
         # continues across them are the part a per-vector transcription gets
         # wrong.
-        vectors = _intermediate(parameter_set)
-        seed = np.frombuffer(vectors.hex_at("r", 0), dtype=np.uint8)
+        vectors = cctv_vectors.intermediate(parameter_set)
+        seed = vectors.array_at("r", 0)
 
         r = sampling.sample_poly_cbd(
             hashes.prf(eta1, seed, np.arange(k, dtype=np.uint8)), eta1
         )
         np.testing.assert_array_equal(
-            np.asarray(as_ints(r)), _decode_vector(vectors.hex_at("r", 1), k)
+            np.asarray(as_ints(r)), cctv_vectors.decode_polys(vectors.hex_at("r", 1), k)
         )
 
         tail = sampling.sample_poly_cbd(
@@ -272,10 +239,10 @@ class SamplePolyCbdTest(parameterized.TestCase):
         )
         packed = np.asarray(as_ints(tail))
         np.testing.assert_array_equal(
-            packed[:k], _decode_vector(vectors.hex_at("e1"), k)
+            packed[:k], cctv_vectors.decode_polys(vectors.hex_at("e1"), k)
         )
         np.testing.assert_array_equal(
-            packed[k:], _decode_vector(vectors.hex_at("e2"), 1)
+            packed[k:], cctv_vectors.decode_polys(vectors.hex_at("e2"), 1)
         )
 
     @parameterized.parameters(2, 3)

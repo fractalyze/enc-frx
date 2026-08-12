@@ -179,6 +179,12 @@ http_archive(
 # One file per parameter set, and all three are needed rather than one: `η1` is
 # 3 for ML-KEM-512 and 2 for the other two, so a single file gates one of the
 # two centered-binomial widths and silently skips the other.
+#
+# Pinned to a commit that predates the final standard in one line — these sets
+# expand `(ρ, σ) ← G(d)`, not `G(d ‖ k)` — which `docs/schemes/ml-kem.md`
+# explains and key generation is gated around. Worth reading before this pin is
+# moved: a set regenerated against the final standard closes that gap and makes
+# the separate gate removable.
 CCTV_COMMIT = "1e3d2860d46e94e777e1b17c7a6f2436387e3ecc"
 
 http_file(
