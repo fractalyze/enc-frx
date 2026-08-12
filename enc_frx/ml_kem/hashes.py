@@ -72,7 +72,11 @@ def g(data: ArrayLike) -> tuple[Array, Array]:
 
 
 def h(data: ArrayLike) -> Array:
-    """`H = SHA3-256`, §4.1. Hashes `ek` into `dk`, and the ciphertext in decaps."""
+    """`H = SHA3-256`, §4.1 — the encapsulation key's hash, wherever it is wanted.
+
+    Key generation stores it in `dk`, encapsulation binds the shared secret to it,
+    and decapsulation recomputes it to check the two halves of `dk` agree (§7.3).
+    """
     return _digest(Sha3_256(), data)
 
 

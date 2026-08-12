@@ -25,9 +25,12 @@ chosen-ciphertext attack that breaks it is exactly what the FO transform exists
 to prevent, so the build target is the one in this package that is not public.
 
 That fences the build graph, and only the build graph. The module ships in the
-wheel like every other, so a determined `import enc_frx.ml_kem.k_pke` still
-reaches it; what the visibility buys is that no target here acquires the
-dependency by accident, and that adding one is a review-visible edit.
+wheel like every other, and no packaging rule can drop it while `ml_kem.py`
+imports it — so the leading underscore is what says the same thing to a reader
+who reached it through `pip install`, where a Bazel visibility means nothing.
+Neither is a barrier: a determined `import enc_frx.ml_kem._k_pke` still works.
+What the pair buys is that no target here acquires the dependency by accident,
+and that a consumer taking it on has been told.
 
 ## Where the batch axis is
 
@@ -58,7 +61,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from enc_frx.ml_kem import encoding, hashes, ntt, sampling
-from enc_frx.ml_kem.params import SEED_SIZE, decryption_key_size
+from enc_frx.ml_kem.params import SEED_SIZE
 
 
 def _inner_product(a_hat: Array, b_hat: Array) -> Array:
@@ -116,7 +119,7 @@ def _key_pair(rho: Array, sigma: Array, *, k: int, eta1: int) -> tuple[Array, Ar
     t_hat = _matrix_vector(a_hat, s_hat) + e_hat
     return (
         encoding.encode_ek(ntt.as_ints(t_hat), rho),
-        encoding.encode_vector(ntt.as_ints(s_hat), 12),
+        encoding.encode_dk_pke(ntt.as_ints(s_hat)),
     )
 
 
@@ -192,13 +195,5 @@ def _noisy_message(
     anyone will ever hand it. Only the published `w` separates the two.
     """
     u, v = encoding.decode_ciphertext(c, k, du, dv)
-    s_hat = ntt.as_field(
-        encoding.decode_vector(
-            encoding.checked_length(
-                dk_pke, decryption_key_size(k), "a K-PKE decryption key"
-            ),
-            12,
-            k,
-        )
-    )
+    s_hat = ntt.as_field(encoding.decode_dk_pke(dk_pke, k))
     return ntt.as_field(v) - ntt.intt(_inner_product(s_hat, ntt.ntt(ntt.as_field(u))))

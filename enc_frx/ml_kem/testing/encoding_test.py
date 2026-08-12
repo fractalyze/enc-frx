@@ -141,6 +141,15 @@ class WireFormatTest(absltest.TestCase):
             self.assertEqual(np.asarray(back_t).tolist(), t_hat.tolist())
             self.assertEqual(np.asarray(back_rho).tolist(), rho.tolist())
 
+    def test_k_pke_decryption_key_round_trips_at_every_k(self) -> None:
+        """Lossless, unlike the ciphertext below: `ŝ` is stored uncompressed."""
+        for k in (2, 3, 4):
+            s_hat = self.rng.integers(0, ref.Q, size=(k, ref.N), dtype=np.int64)
+            dk_pke = encoding.encode_dk_pke(s_hat)
+            self.assertEqual(dk_pke.shape[-1], 384 * k, f"k={k}")
+            back = encoding.decode_dk_pke(dk_pke, k)
+            self.assertEqual(np.asarray(back).tolist(), s_hat.tolist())
+
     def test_ciphertext_length_matches_the_parameter_set(self) -> None:
         """(k, du, dv) for ML-KEM-512 / -768 / -1024."""
         for k, du, dv in ((2, 10, 4), (3, 10, 4), (4, 11, 5)):
@@ -199,6 +208,10 @@ class WireFormatTest(absltest.TestCase):
         with self.assertRaisesRegex(ValueError, "decapsulation key"):
             encoding.decode_dk(
                 np.zeros(encoding.decapsulation_key_size(k) - 40, dtype=np.uint8), k
+            )
+        with self.assertRaisesRegex(ValueError, "K-PKE decryption key"):
+            encoding.decode_dk_pke(
+                np.zeros(encoding.decryption_key_size(k) - 1, dtype=np.uint8), k
             )
         with self.assertRaisesRegex(ValueError, "ciphertext"):
             encoding.decode_ciphertext(

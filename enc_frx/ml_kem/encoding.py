@@ -185,6 +185,28 @@ def decode_ek(ek: ArrayLike, k: int) -> tuple[Array, Array]:
     return decode_vector(e[..., :split], 12, k), e[..., split:]
 
 
+def encode_dk_pke(s_hat: ArrayLike) -> Array:
+    """`ByteEncode_12(ŝ)` — K-PKE's decryption key, FIPS 203 §5.1.
+
+    A name rather than a bare `encode_vector(·, 12)` at each end because the two
+    ends are in different modules: key generation writes it and decryption reads
+    it back, and the width is the only thing that makes them agree. Named, the
+    pair is one definition; open-coded, it is two readings of the same line.
+    """
+    return encode_vector(s_hat, 12)
+
+
+def decode_dk_pke(dk_pke: ArrayLike, k: int) -> Array:
+    """Inverse of `encode_dk_pke`, returning `ŝ` as `[..., k, 256]`.
+
+    Distinct from `decode_dk` below, which splits ML-KEM's `dk` into its four
+    fields — the first of which is this.
+    """
+    return decode_vector(
+        checked_length(dk_pke, decryption_key_size(k), "a K-PKE decryption key"), 12, k
+    )
+
+
 def encode_ciphertext(u: ArrayLike, v: ArrayLike, du: int, dv: int) -> Array:
     """`ByteEncode_du(Compress_du(u)) ‖ ByteEncode_dv(Compress_dv(v))`."""
     return fnp.concatenate(
@@ -248,7 +270,20 @@ def coefficients_are_reduced(b: ArrayLike) -> Array:
     `byte_decode` reduces mod `2^d` and re-encoding always reproduces the input,
     making the check a constant `True`.
 
+    Takes one polynomial or a whole encoded vector — §7.2 asks the question of
+    `ek`'s `t̂`, which is `k` of them — and reduces over both, so the result is
+    one boolean per batch entry either way. How many there are is the byte
+    length divided by `POLY_BYTES`, which is static at trace time.
+
     A value rather than an exception because the batch axis has no way to raise
     for entry 7 alone.
     """
-    return (_decode_raw(b, 12) < np.int32(Q)).all(axis=-1)
+    bi = fnp.asarray(b)
+    if bi.shape[-1] % POLY_BYTES:
+        raise ValueError(
+            f"a ByteEncode_12 value is a multiple of {POLY_BYTES} bytes, "
+            f"got {bi.shape[-1]}"
+        )
+    polynomials = bi.reshape(*bi.shape[:-1], bi.shape[-1] // POLY_BYTES, POLY_BYTES)
+    reduced = _decode_raw(polynomials, 12) < np.int32(Q)
+    return reduced.all(axis=-1).all(axis=-1)

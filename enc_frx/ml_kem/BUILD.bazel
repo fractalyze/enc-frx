@@ -74,13 +74,13 @@ py_library(
 )
 
 # Not public: K-PKE is IND-CPA only, so only ML-KEM itself and this package's
-# tests may depend on it. What that does and does not fence is in `k_pke.py`'s
-# module docstring.
+# tests may depend on it. The underscored name carries the same intent into the
+# wheel, which the visibility cannot reach — see `_k_pke.py`'s module docstring.
 py_library(
-    name = "k_pke",
+    name = "_k_pke",
     srcs = [
         "__init__.py",
-        "k_pke.py",
+        "_k_pke.py",
     ],
     visibility = ["//enc_frx/ml_kem:__subpackages__"],
     deps = [
@@ -91,5 +91,24 @@ py_library(
         ":sampling",
         requirement("frx"),
         requirement("numpy"),
+    ],
+)
+
+# ML-KEM itself: the FO transform over K-PKE, and the only IND-CCA2 thing in the
+# package. Public, where `_k_pke` beneath it is not.
+py_library(
+    name = "ml_kem",
+    srcs = [
+        "__init__.py",
+        "ml_kem.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":_k_pke",
+        ":encoding",
+        ":hashes",
+        ":params",
+        "//enc_frx:kem",
+        requirement("frx"),
     ],
 )

@@ -24,7 +24,7 @@ import frx
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from enc_frx.ml_kem import k_pke
+from enc_frx.ml_kem import _k_pke
 from enc_frx.ml_kem.ntt import as_ints
 from enc_frx.ml_kem.params import (
     SEED_SIZE,
@@ -78,7 +78,7 @@ class KeyGenTest(parameterized.TestCase):
         self, parameter_set: str, k: int, eta1: int, _eta2: int, _du: int, _dv: int
     ) -> None:
         vectors = cctv_vectors.intermediate(parameter_set)
-        ek, dk = k_pke._key_pair(
+        ek, dk = _k_pke._key_pair(
             vectors.array_at("ρ"), vectors.array_at("σ"), k=k, eta1=eta1
         )
         # `ek_PKE` is `ByteEncode_12(t̂) ‖ ρ`, so this pins `t̂` exactly as well.
@@ -98,13 +98,13 @@ class KeyGenTest(parameterized.TestCase):
         # above.
         d = cctv_vectors.intermediate(parameter_set).hex_at("d")
         expanded = hashlib.sha3_512(d + bytes([k])).digest()
-        want = k_pke._key_pair(
+        want = _k_pke._key_pair(
             np.frombuffer(expanded[:SEED_SIZE], dtype=np.uint8),
             np.frombuffer(expanded[SEED_SIZE:], dtype=np.uint8),
             k=k,
             eta1=eta1,
         )
-        got = k_pke.key_gen(np.frombuffer(d, dtype=np.uint8), k=k, eta1=eta1)
+        got = _k_pke.key_gen(np.frombuffer(d, dtype=np.uint8), k=k, eta1=eta1)
         self.assertEqual(
             [to_bytes(part) for part in got], [to_bytes(part) for part in want]
         )
@@ -114,9 +114,9 @@ class KeyGenTest(parameterized.TestCase):
         # but nothing here is written per-entry either, so the leading axis works
         # — and an implementation that mixed entries would still round-trip.
         seeds = np.random.default_rng(0).integers(0, 256, (4, SEED_SIZE), np.uint8)
-        batched = k_pke.key_gen(seeds, **_768_KEY_GEN)
+        batched = _k_pke.key_gen(seeds, **_768_KEY_GEN)
         for row, seed in enumerate(seeds):
-            solo = k_pke.key_gen(seed, **_768_KEY_GEN)
+            solo = _k_pke.key_gen(seed, **_768_KEY_GEN)
             for batched_part, solo_part in zip(batched, solo):
                 np.testing.assert_array_equal(
                     np.asarray(batched_part)[row], np.asarray(solo_part)
@@ -128,7 +128,7 @@ class EncryptTest(parameterized.TestCase):
     def test_the_ciphertext_matches_the_published_vector(
         self, parameter_set: str, k: int, eta1: int, eta2: int, du: int, dv: int
     ) -> None:
-        got = k_pke.encrypt(
+        got = _k_pke.encrypt(
             *_encrypt_inputs(parameter_set),
             k=k,
             eta1=eta1,
@@ -142,27 +142,27 @@ class EncryptTest(parameterized.TestCase):
 
     def test_the_same_randomness_gives_the_same_ciphertext(self) -> None:
         # The property decapsulation's re-encryption check rests on, and it
-        # cannot fail today — which is the point. See `k_pke`'s module docstring
+        # cannot fail today — which is the point. See `_k_pke`'s module docstring
         # for what an `encrypt` that drew its own randomness would break.
         args = _encrypt_inputs("ML-KEM-768")
         self.assertEqual(
-            to_bytes(k_pke.encrypt(*args, **_768)),
-            to_bytes(k_pke.encrypt(*args, **_768)),
+            to_bytes(_k_pke.encrypt(*args, **_768)),
+            to_bytes(_k_pke.encrypt(*args, **_768)),
         )
 
     def test_different_randomness_gives_a_different_ciphertext(self) -> None:
         # And `r` is actually read: an `encrypt` that ignored it would be
         # deterministic too, and every round trip would still pass.
         ek, m, _ = _encrypt_inputs("ML-KEM-768")
-        first = k_pke.encrypt(ek, m, _zeros(SEED_SIZE), **_768)
-        second = k_pke.encrypt(ek, m, _zeros(SEED_SIZE) + 1, **_768)
+        first = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE), **_768)
+        second = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE) + 1, **_768)
         self.assertNotEqual(to_bytes(first), to_bytes(second))
 
     def test_the_traced_ciphertext_matches_the_eager_one(self) -> None:
         args = _encrypt_inputs("ML-KEM-768")
-        traced = frx.jit(lambda ek, m, r: k_pke.encrypt(ek, m, r, **_768))
+        traced = frx.jit(lambda ek, m, r: _k_pke.encrypt(ek, m, r, **_768))
         self.assertEqual(
-            to_bytes(traced(*args)), to_bytes(k_pke.encrypt(*args, **_768))
+            to_bytes(traced(*args)), to_bytes(_k_pke.encrypt(*args, **_768))
         )
 
 
@@ -172,7 +172,7 @@ class DecryptTest(parameterized.TestCase):
         self, parameter_set: str, k: int, _eta1: int, _eta2: int, du: int, dv: int
     ) -> None:
         vectors = cctv_vectors.intermediate(parameter_set)
-        got = k_pke.decrypt(
+        got = _k_pke.decrypt(
             vectors.array_at("dkPKE", 0), vectors.array_at("c"), k=k, du=du, dv=dv
         )
         self.assertEqual(to_bytes(got), vectors.hex_at("m"))
@@ -185,7 +185,7 @@ class DecryptTest(parameterized.TestCase):
         # see `_noisy_message` for the sign error the rounding would forgive on
         # every ciphertext ever generated.
         vectors = cctv_vectors.intermediate(parameter_set)
-        got = k_pke._noisy_message(
+        got = _k_pke._noisy_message(
             vectors.array_at("dkPKE", 0), vectors.array_at("c"), k=k, du=du, dv=dv
         )
         np.testing.assert_array_equal(
@@ -203,13 +203,13 @@ class RoundTripTest(parameterized.TestCase):
     ) -> None:
         rng = np.random.default_rng(len(parameter_set))
         batch = 4
-        ek, dk = k_pke.key_gen(
+        ek, dk = _k_pke.key_gen(
             rng.integers(0, 256, (batch, SEED_SIZE), np.uint8), k=k, eta1=eta1
         )
         m = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
         r = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
-        c = k_pke.encrypt(ek, m, r, k=k, eta1=eta1, eta2=eta2, du=du, dv=dv)
-        got = k_pke.decrypt(dk, c, k=k, du=du, dv=dv)
+        c = _k_pke.encrypt(ek, m, r, k=k, eta1=eta1, eta2=eta2, du=du, dv=dv)
+        got = _k_pke.decrypt(dk, c, k=k, du=du, dv=dv)
         np.testing.assert_array_equal(np.asarray(got), m)
 
     def test_each_batch_entry_is_independent(self) -> None:
@@ -221,15 +221,15 @@ class RoundTripTest(parameterized.TestCase):
         # The same batch the tests above use, so this reuses their compiled
         # shapes rather than forcing a whole second set for one more entry.
         batch = 4
-        ek, _ = k_pke.key_gen(
+        ek, _ = _k_pke.key_gen(
             rng.integers(0, 256, (batch, SEED_SIZE), np.uint8),
             **_768_KEY_GEN,
         )
         m = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
         r = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
-        got = np.asarray(k_pke.encrypt(ek, m, r, **_768))
+        got = np.asarray(_k_pke.encrypt(ek, m, r, **_768))
         for row in range(batch):
-            solo = k_pke.encrypt(np.asarray(ek)[row], m[row], r[row], **_768)
+            solo = _k_pke.encrypt(np.asarray(ek)[row], m[row], r[row], **_768)
             np.testing.assert_array_equal(got[row], np.asarray(solo))
 
 
@@ -248,29 +248,29 @@ class LengthCheckTest(absltest.TestCase):
 
     def test_rejects_a_short_encapsulation_key(self) -> None:
         with self.assertRaises(ValueError):
-            k_pke.encrypt(
+            _k_pke.encrypt(
                 _zeros(self._EK - 1), _zeros(SEED_SIZE), _zeros(SEED_SIZE), **_768
             )
 
     def test_rejects_a_message_that_is_not_32_bytes(self) -> None:
         with self.assertRaises(ValueError):
-            k_pke.encrypt(
+            _k_pke.encrypt(
                 _zeros(self._EK), _zeros(SEED_SIZE + 1), _zeros(SEED_SIZE), **_768
             )
 
     def test_rejects_randomness_that_is_not_32_bytes(self) -> None:
         with self.assertRaises(ValueError):
-            k_pke.encrypt(
+            _k_pke.encrypt(
                 _zeros(self._EK), _zeros(SEED_SIZE), _zeros(SEED_SIZE - 1), **_768
             )
 
     def test_rejects_a_short_key_generation_seed(self) -> None:
         with self.assertRaises(ValueError):
-            k_pke.key_gen(_zeros(SEED_SIZE - 1), **_768_KEY_GEN)
+            _k_pke.key_gen(_zeros(SEED_SIZE - 1), **_768_KEY_GEN)
 
     def test_rejects_a_short_decryption_key(self) -> None:
         with self.assertRaises(ValueError):
-            k_pke.decrypt(
+            _k_pke.decrypt(
                 _zeros(self._DK - 1),
                 _zeros(self._C),
                 **_768_DECRYPT,
@@ -278,7 +278,7 @@ class LengthCheckTest(absltest.TestCase):
 
     def test_rejects_a_short_ciphertext(self) -> None:
         with self.assertRaises(ValueError):
-            k_pke.decrypt(
+            _k_pke.decrypt(
                 _zeros(self._DK),
                 _zeros(self._C - 1),
                 **_768_DECRYPT,
