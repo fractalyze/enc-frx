@@ -89,12 +89,12 @@ py_test(
 # K-PKE assembled: the published intermediate values at every stage, and the
 # round trips that cover the space between the three points they pin.
 py_test(
-    name = "k_pke_test",
+    name = "_k_pke_test",
     size = "medium",
-    srcs = ["k_pke_test.py"],
+    srcs = ["_k_pke_test.py"],
     deps = [
         ":cctv_vectors",
-        "//enc_frx/ml_kem:k_pke",
+        "//enc_frx/ml_kem:_k_pke",
         "//enc_frx/ml_kem:ntt",
         "//enc_frx/ml_kem:params",
         "//enc_frx/testing:kat",

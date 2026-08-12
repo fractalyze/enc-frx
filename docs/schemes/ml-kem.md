@@ -56,7 +56,7 @@ Everything is batch-first over leading axes; there is no scalar entry point.
   serialize them is writing the loop.
 - **K-PKE's matrix-vector products** are one `base_mul` over a broadcast pair and
   one sum over the column axis, for any `k` — see
-  [`k_pke.py`](../../enc_frx/ml_kem/k_pke.py). Writing `Â ∘ ŝ` as a loop over the
+  [`_k_pke.py`](../../enc_frx/ml_kem/_k_pke.py). Writing `Â ∘ ŝ` as a loop over the
   rows would issue `k` of each and serialize work that shares nothing.
 - **The samplers' compaction is a gather, not a scatter**, because XLA
   serializes a large scatter on GPU — see

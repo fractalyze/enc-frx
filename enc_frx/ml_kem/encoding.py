@@ -185,6 +185,28 @@ def decode_ek(ek: ArrayLike, k: int) -> tuple[Array, Array]:
     return decode_vector(e[..., :split], 12, k), e[..., split:]
 
 
+def encode_dk_pke(s_hat: ArrayLike) -> Array:
+    """`ByteEncode_12(ŝ)` — K-PKE's decryption key, FIPS 203 §5.1.
+
+    A name rather than a bare `encode_vector(·, 12)` at each end because the two
+    ends are in different modules: key generation writes it and decryption reads
+    it back, and the width is the only thing that makes them agree. Named, the
+    pair is one definition; open-coded, it is two readings of the same line.
+    """
+    return encode_vector(s_hat, 12)
+
+
+def decode_dk_pke(dk_pke: ArrayLike, k: int) -> Array:
+    """Inverse of `encode_dk_pke`, returning `ŝ` as `[..., k, 256]`.
+
+    Distinct from `decode_dk` below, which splits ML-KEM's `dk` into its four
+    fields — the first of which is this.
+    """
+    return decode_vector(
+        checked_length(dk_pke, decryption_key_size(k), "a K-PKE decryption key"), 12, k
+    )
+
+
 def encode_ciphertext(u: ArrayLike, v: ArrayLike, du: int, dv: int) -> Array:
     """`ByteEncode_du(Compress_du(u)) ‖ ByteEncode_dv(Compress_dv(v))`."""
     return fnp.concatenate(
