@@ -109,7 +109,7 @@ def byte_encode(f: ArrayLike, d: int) -> Array:
 
 def _decode_raw(b: ArrayLike, d: int) -> Array:
     """The d-bit values the bytes carry, before any reduction."""
-    bits = _bytes_to_bits(b)
+    bits = bytes_to_bits(b)
     grouped = bits.reshape(*bits.shape[:-2], N, d)
     weights = np.int32(1) << np.arange(d, dtype=np.int32)
     return (grouped * weights).sum(axis=-1).astype(np.int32)
@@ -133,7 +133,13 @@ def _bits_to_bytes(bits: Array) -> Array:
     return (grouped * weights).sum(axis=-1).astype(np.uint8)
 
 
-def _bytes_to_bits(b: ArrayLike) -> Array:
+def bytes_to_bits(b: ArrayLike) -> Array:
+    """`[..., L]` bytes to `[..., L, 8]` bits, little-endian within a byte.
+
+    Public because `sampling.py` reads the same bit stream: FIPS 203 fixes one
+    bit order for the whole standard, so `SamplePolyCBD` and `ByteDecode` must
+    not each have their own reading of it.
+    """
     bi = _as_int(b)
     return (bi[..., None] >> fnp.arange(8, dtype=np.int32)) & np.int32(1)
 

@@ -39,3 +39,42 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# C2SP's CCTV vectors: the intermediate values that pin each sampler on its own,
+# and the unlucky seeds that pin the XOF budget.
+py_library(
+    name = "cctv_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "cctv_vectors.py",
+    ],
+    visibility = ["//enc_frx:__subpackages__"],
+)
+
+py_test(
+    name = "sampling_test",
+    size = "medium",
+    srcs = ["sampling_test.py"],
+    data = [
+        "@cctv_ml_kem_intermediate_1024//file",
+        "@cctv_ml_kem_intermediate_512//file",
+        "@cctv_ml_kem_intermediate_768//file",
+        "@cctv_ml_kem_unlucky_1024//file",
+        "@cctv_ml_kem_unlucky_512//file",
+        "@cctv_ml_kem_unlucky_768//file",
+    ],
+    deps = [
+        ":cctv_vectors",
+        ":fips203_reference",
+        "//enc_frx/ml_kem:encoding",
+        "//enc_frx/ml_kem:hashes",
+        "//enc_frx/ml_kem:ntt",
+        "//enc_frx/ml_kem:params",
+        "//enc_frx/ml_kem:sampling",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
