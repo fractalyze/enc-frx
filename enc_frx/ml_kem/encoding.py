@@ -89,7 +89,9 @@ def decompress(y: ArrayLike, d: int) -> Array:
     _check_width(d)
     yi = _as_int(y)
     num = yi * np.int32(2 * Q) + np.int32(1 << d)
-    return num // np.int32(1 << (d + 1))
+    # `>>` is exactly floor division by a power of two, including for negatives;
+    # `//` on a signed lane emits a sign-correction chain XLA cannot drop.
+    return num >> np.int32(d + 1)
 
 
 def byte_encode(f: ArrayLike, d: int) -> Array:
@@ -105,6 +107,14 @@ def byte_encode(f: ArrayLike, d: int) -> Array:
     return _bits_to_bytes(bits.reshape(*fi.shape[:-1], N * d))
 
 
+def _decode_raw(b: ArrayLike, d: int) -> Array:
+    """The d-bit values the bytes carry, before any reduction."""
+    bits = _bytes_to_bits(b)
+    grouped = bits.reshape(*bits.shape[:-2], N, d)
+    weights = np.int32(1) << np.arange(d, dtype=np.int32)
+    return (grouped * weights).sum(axis=-1).astype(np.int32)
+
+
 def byte_decode(b: ArrayLike, d: int) -> Array:
     """`[..., 32d]` bytes to `[..., 256]` coefficients, FIPS 203 Algorithm 6.
 
@@ -113,9 +123,7 @@ def byte_decode(b: ArrayLike, d: int) -> Array:
     docstring.
     """
     _check_width(d)
-    bits = _bytes_to_bits(b).reshape(*fnp.asarray(b).shape[:-1], N, d)
-    weights = (np.int32(1) << fnp.arange(d, dtype=np.int32)).astype(np.int32)
-    coeffs = (bits * weights).sum(axis=-1).astype(np.int32)
+    coeffs = _decode_raw(b, d)
     return coeffs % np.int32(Q) if d == 12 else coeffs
 
 
@@ -213,10 +221,12 @@ def decode_dk(dk: ArrayLike, k: int) -> tuple[Array, Array, Array, Array]:
 def coefficients_are_reduced(b: ArrayLike) -> Array:
     """The modulus check of FIPS 203 §7.2, as a per-entry boolean.
 
-    `ByteEncode_12(ByteDecode_12(x)) == x` holds exactly when every coefficient
-    the bytes carry was already below `q` — the decode's mod-`q` is what makes a
-    12-bit value of 3329 or more fail to round-trip. Normative, and a malformed
-    key that skips it is a documented attack surface.
+    The standard states it as `ByteEncode_12(ByteDecode_12(x)) == x`, which holds
+    exactly when every 12-bit value the bytes carry is already below `q`: the
+    decode maps `v` to `v % q`, and that re-encodes to `v` only when `v < q`. So
+    the predicate is the same one asked directly, without materializing a decode
+    and an encode to compare. Normative, and a malformed key that skips it is a
+    documented attack surface.
 
     Only meaningful at d = 12, so the width is not a parameter: below it
     `byte_decode` reduces mod `2^d` and re-encoding always reproduces the input,
@@ -225,5 +235,4 @@ def coefficients_are_reduced(b: ArrayLike) -> Array:
     A value rather than an exception because the batch axis has no way to raise
     for entry 7 alone.
     """
-    bi = fnp.asarray(b).astype(np.uint8)
-    return (byte_encode(byte_decode(bi, 12), 12) == bi).all(axis=-1)
+    return (_decode_raw(b, 12) < np.int32(Q)).all(axis=-1)
