@@ -26,3 +26,16 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "encoding_test",
+    size = "medium",
+    srcs = ["encoding_test.py"],
+    deps = [
+        ":fips203_reference",
+        "//enc_frx/ml_kem:encoding",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

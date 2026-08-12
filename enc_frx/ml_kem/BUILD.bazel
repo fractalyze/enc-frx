@@ -2,6 +2,15 @@ load("@enc_frx_pip//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_library")
 
 py_library(
+    name = "params",
+    srcs = [
+        "__init__.py",
+        "params.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "ntt",
     srcs = [
         "__init__.py",
@@ -9,8 +18,23 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":params",
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
+    ],
+)
+
+py_library(
+    name = "encoding",
+    srcs = [
+        "__init__.py",
+        "encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":params",
+        requirement("frx"),
+        requirement("numpy"),
     ],
 )
