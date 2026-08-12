@@ -167,6 +167,14 @@ Self-consistency is not evidence either. Seal-then-open round-trips forever
 inside a self-consistent wrong implementation. Property-based tests supplement
 the KATs; they never replace them.
 
+**A lossy step hides its own input, so gate above it.** Where a value is
+rounded, compressed or truncated on its way out, comparing the output is a
+weaker check than it looks: ML-KEM's `Compress_1` maps both `⌈q/2⌋` and its
+negation to the same bit, so a sign error in decryption's `w` recovers the right
+message from every ciphertext, and only the published `w` separates them. When a
+standard publishes the pre-quantized value, compare that one — and give the
+quantity its own entry point if the production path lacks one.
+
 An exhaustive sweep — every parameter set against every published vector — is
 tagged `slow_kat`, which drops it from the per-PR run and keeps it in the
 scheduled one.
