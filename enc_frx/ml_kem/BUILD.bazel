@@ -14,3 +14,16 @@ py_library(
         requirement("zk_dtypes"),
     ],
 )
+
+py_library(
+    name = "encoding",
+    srcs = [
+        "__init__.py",
+        "encoding.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

@@ -108,3 +108,36 @@ def negacyclic_convolution(f: list[int], g: list[int]) -> list[int]:
             else:
                 out[k - N] = (out[k - N] - fi * gj) % Q
     return [x % Q for x in out]
+
+
+# --- §4.2.1 compression and Algorithms 5-6, in plain integers -----------------
+#
+# The rounding is the reason these exist separately from the traced code rather
+# than being asserted against it: `round-half-up over integers` and
+# `round(x * 2**d / q)` agree on almost every input and disagree at the ties,
+# and the disagreement is invisible to a round trip.
+
+
+def compress(x: int, d: int) -> int:
+    """`⌈(2^d / q) · x⌋ mod 2^d`, round half up, exactly."""
+    return ((2 * x * (1 << d) + Q) // (2 * Q)) % (1 << d)
+
+
+def decompress(y: int, d: int) -> int:
+    """`⌈(q / 2^d) · y⌋`, round half up, exactly."""
+    return (2 * y * Q + (1 << d)) // (1 << (d + 1))
+
+
+def byte_encode(f: list[int], d: int) -> list[int]:
+    """Algorithm 5 — little-endian bits within a coefficient and within a byte."""
+    bits = [(v >> j) & 1 for v in f for j in range(d)]
+    return [sum(bits[i * 8 + j] << j for j in range(8)) for i in range(len(bits) // 8)]
+
+
+def byte_decode(b: list[int], d: int) -> list[int]:
+    """Algorithm 6 — reduces mod q at d = 12, mod 2^d below it."""
+    bits = [(byte >> j) & 1 for byte in b for j in range(8)]
+    m = Q if d == 12 else (1 << d)
+    return [
+        sum(bits[i * d + j] << j for j in range(d)) % m for i in range(len(bits) // d)
+    ]
