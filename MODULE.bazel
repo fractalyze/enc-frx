@@ -67,6 +67,10 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 
 # The ACVP JSON split: prompt.json carries the inputs, expectedResults.json the
 # outputs, joined on (tgId, tcId). Both halves are needed for one vector set.
+#
+# These are generated against the final standard, which the CCTV sets below are
+# not, so the keyGen set is the one thing here that gates `(d, z) -> (ek, dk)`
+# end to end.
 http_file(
     name = "acvp_ml_kem_keygen_prompt",
     downloaded_file_path = "prompt.json",
@@ -182,9 +186,11 @@ http_archive(
 #
 # Pinned to a commit that predates the final standard in one line — these sets
 # expand `(ρ, σ) ← G(d)`, not `G(d ‖ k)` — which `docs/schemes/ml-kem.md`
-# explains and key generation is gated around. Worth reading before this pin is
-# moved: a set regenerated against the final standard closes that gap and makes
-# the separate gate removable.
+# explains and key generation is gated around: they enter below the expansion,
+# at `_key_pair`. The expansion itself is ACVP's to gate, since its sets are
+# generated against the final standard. Moving this pin to a regenerated CCTV
+# set would let these files drive key generation from `d` as well; it would not
+# uncover anything the ACVP sets do not already gate.
 CCTV_COMMIT = "1e3d2860d46e94e777e1b17c7a6f2436387e3ecc"
 
 http_file(

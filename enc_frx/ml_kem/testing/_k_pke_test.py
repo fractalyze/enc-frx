@@ -9,16 +9,16 @@ Two gates that fail on different things:
 - **Round trips over random input** cover the space between those three points,
   and the batch axis, which a single published run cannot.
 
-**The published vectors predate one line of the final standard**, which is why
-key generation is gated in two pieces here — `_key_pair` against the vectors,
-and `key_gen`'s `G(d ‖ k)` expansion against `hashlib`. The full account, and
-the wrong repair it exists to prevent, is in
+**The published vectors predate one line of the final standard** — they expand
+`(ρ, σ) ← G(d)` where FIPS 203 Algorithm 13 line 1 is `G(d ‖ k)` — so they can
+only enter key generation below that expansion, at `_key_pair`. The expansion
+itself is gated by ACVP, through the whole of `MlKem.keygen`
+([`acvp_test.py`](acvp_test.py)). The full account, and the wrong repair it
+exists to prevent, is in
 [`docs/schemes/ml-kem.md`](../../../docs/schemes/ml-kem.md).
 """
 
 from __future__ import annotations
-
-import hashlib
 
 import frx
 import numpy as np
@@ -87,27 +87,6 @@ class KeyGenTest(parameterized.TestCase):
         # 384k bytes meant here, and later as an 800-byte value equal to `ek` —
         # an upstream slip for `ekPKE`. Index 0 is the one to ask for.
         self.assertEqual(to_bytes(dk), vectors.hex_at("dkPKE", 0))
-
-    @parameterized.named_parameters(*_NAMED)
-    def test_the_seed_expansion_binds_the_parameter_set(
-        self, parameter_set: str, k: int, eta1: int, _eta2: int, _du: int, _dv: int
-    ) -> None:
-        # No vector loaded here carries the `k` byte (module docstring), so the
-        # expansion is pinned against `hashlib` — where SHA3-512 is established
-        # for this repo anyway — and the lattice work below it by the vectors
-        # above.
-        d = cctv_vectors.intermediate(parameter_set).hex_at("d")
-        expanded = hashlib.sha3_512(d + bytes([k])).digest()
-        want = _k_pke._key_pair(
-            np.frombuffer(expanded[:SEED_SIZE], dtype=np.uint8),
-            np.frombuffer(expanded[SEED_SIZE:], dtype=np.uint8),
-            k=k,
-            eta1=eta1,
-        )
-        got = _k_pke.key_gen(np.frombuffer(d, dtype=np.uint8), k=k, eta1=eta1)
-        self.assertEqual(
-            [to_bytes(part) for part in got], [to_bytes(part) for part in want]
-        )
 
     def test_a_batch_of_seeds_generates_the_same_keys_one_at_a_time(self) -> None:
         # `keygen` is not on the hot path and the `Kem` seam does not batch it,

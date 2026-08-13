@@ -6,8 +6,9 @@ The published files carry the whole of one encapsulation and its decapsulation �
 values someone else computed, at every parameter set. Key generation is not: the
 files predate FIPS 203 Algorithm 13's `G(d ‖ k)` and so cannot reproduce a key
 from `d` (see [`docs/schemes/ml-kem.md`](../../../docs/schemes/ml-kem.md)), which
-leaves the *layout* of `dk` as what this file gates and the lattice work to
-[`_k_pke_test.py`](_k_pke_test.py).
+leaves the *layout* of `dk` as what this file gates, the lattice work to
+[`_k_pke_test.py`](_k_pke_test.py), and key generation from `d` to
+[`acvp_test.py`](acvp_test.py).
 
 **`KBar` is the published implicit-rejection secret** — `J(z ‖ c)` for the file's
 own `c`. Reaching it needs a `dk` that fails a check while `z` and `c` stay
