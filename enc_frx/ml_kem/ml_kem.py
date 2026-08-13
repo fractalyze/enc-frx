@@ -68,16 +68,16 @@ class MlKem:
     """ML-KEM at one parameter set, over the `Kem` seam.
 
     `MlKem(ML_KEM_768)`: the set is named once, at construction, and no call site
-    below names it again. `params.k` shapes every array here, so it is a Python
+    below names it again. `_params.k` shapes every array here, so it is a Python
     `int` that shapes the trace and never a traced value.
 
-    The set stays reachable as `params` because an instance that hid which one it
-    is would force every holder to carry the row beside it — the sizes the seam
-    exposes are derived from it, and `_k_pke` takes its five numbers directly.
+    The set is private because the seam's whole premise is that a consumer names
+    a scheme once (`enc_frx/kem.py`); a public row is what lets generic code
+    reach for `scheme.params.k` and turn the swap back into a call-site edit.
     """
 
     def __init__(self, params: MlKemParams) -> None:
-        self.params = params
+        self._params = params
         # `d ‖ z`: the K-PKE seed and the rejection seed, 32 bytes each (§7.1).
         self.seed_size = 2 * SEED_SIZE
         self.randomness_size = SEED_SIZE
@@ -89,13 +89,15 @@ class MlKem:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, MlKem):
             return NotImplemented
-        return self.params == other.params
+        return self._params == other._params
 
     def __hash__(self) -> int:
         # Value-based, per the seam: an instance rides pytree aux, where identity
         # equality re-traces the enclosing jit zone for every freshly built one.
-        # The frozen dataclass is what makes this a one-liner.
-        return hash(self.params)
+        return hash(self._params)
+
+    def __repr__(self) -> str:
+        return f"MlKem({self._params.name})"
 
     def keygen(self, seed: ArrayLike) -> tuple[Array, Array]:
         """FIPS 203 Algorithm 16: `[..., 64]` -> `(ek, dk)`.
@@ -110,7 +112,7 @@ class MlKem:
             seed, self.seed_size, "an ML-KEM key generation seed"
         )
         d, z = material[..., :SEED_SIZE], material[..., SEED_SIZE:]
-        ek, dk_pke = _k_pke.key_gen(d, k=self.params.k, eta1=self.params.eta1)
+        ek, dk_pke = _k_pke.key_gen(d, k=self._params.k, eta1=self._params.eta1)
         return ek, encoding.encode_dk(dk_pke, ek, hashes.h(ek), z)
 
     def encaps(
@@ -149,7 +151,7 @@ class MlKem:
         Always a shared secret, one per batch entry, and never a verdict — see
         the module docstring for why the alternative is the attack.
         """
-        params = self.params
+        params = self._params
         dk_pke, ek, _, z = encoding.decode_dk(decapsulation_key, params.k)
         c = encoding.checked_length(ciphertext, self.ciphertext_size, "a ciphertext")
 
@@ -184,7 +186,9 @@ class MlKem:
             encapsulation_key, self.encapsulation_key_size, "an encapsulation key"
         )
         # `ek = ByteEncode_12(t̂) ‖ ρ`, §7.1: the seed carries no coefficients.
-        return encoding.coefficients_are_reduced(key[..., : POLY_BYTES * self.params.k])
+        return encoding.coefficients_are_reduced(
+            key[..., : POLY_BYTES * self._params.k]
+        )
 
     def check_decapsulation_key(self, decapsulation_key: ArrayLike) -> Array:
         """FIPS 203 §7.3's hash check, as a `bool[...]` per batch entry.
@@ -199,7 +203,7 @@ class MlKem:
         answers the one question §7.3 asks, so a harness driving ACVP's
         `decapsulationKeyCheck` compares against it directly.
         """
-        _, ek, h, _ = encoding.decode_dk(decapsulation_key, self.params.k)
+        _, ek, h, _ = encoding.decode_dk(decapsulation_key, self._params.k)
         return fnp.all(hashes.h(ek) == h, axis=-1)
 
     def _encrypt(self, ek: Array, m: Array, r: Array) -> Array:
@@ -209,7 +213,7 @@ class MlKem:
         states each K-PKE algorithm's parameter list itself, and a `_k_pke` that
         took an ML-KEM parameter set would run the import edge backwards.
         """
-        params = self.params
+        params = self._params
         return _k_pke.encrypt(
             ek,
             m,

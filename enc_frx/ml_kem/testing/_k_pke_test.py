@@ -43,21 +43,21 @@ _768_ENCRYPT = {
     "du": ML_KEM_768.du,
     "dv": ML_KEM_768.dv,
 }
-_768_KEY_GEN = {"k": ML_KEM_768.k, "eta1": ML_KEM_768.eta1}
-_768_DECRYPT = {"k": ML_KEM_768.k, "du": ML_KEM_768.du, "dv": ML_KEM_768.dv}
+_768_KEY_GEN = {name: _768_ENCRYPT[name] for name in ("k", "eta1")}
+_768_DECRYPT = {name: _768_ENCRYPT[name] for name in ("k", "du", "dv")}
 
 
 def _zeros(size: int) -> np.ndarray:
     return np.zeros(size, dtype=np.uint8)
 
 
-def _encrypt_inputs(parameter_set: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _encrypt_inputs(params: MlKemParams) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """`(ek, m, r)` as published.
 
     `r` names two things in the file — the 32-byte randomness first, the vector
     sampled from it later — so occurrence 0 is the one `encrypt` takes.
     """
-    vectors = cctv_vectors.intermediate(parameter_set)
+    vectors = cctv_vectors.intermediate(params.name)
     return (
         vectors.array_at("ek"),
         vectors.array_at("m"),
@@ -101,7 +101,7 @@ class EncryptTest(parameterized.TestCase):
         self, params: MlKemParams
     ) -> None:
         got = _k_pke.encrypt(
-            *_encrypt_inputs(params.name),
+            *_encrypt_inputs(params),
             k=params.k,
             eta1=params.eta1,
             eta2=params.eta2,
@@ -116,7 +116,7 @@ class EncryptTest(parameterized.TestCase):
         # The property decapsulation's re-encryption check rests on, and it
         # cannot fail today — which is the point. See `_k_pke`'s module docstring
         # for what an `encrypt` that drew its own randomness would break.
-        args = _encrypt_inputs(ML_KEM_768.name)
+        args = _encrypt_inputs(ML_KEM_768)
         self.assertEqual(
             to_bytes(_k_pke.encrypt(*args, **_768_ENCRYPT)),
             to_bytes(_k_pke.encrypt(*args, **_768_ENCRYPT)),
@@ -125,13 +125,13 @@ class EncryptTest(parameterized.TestCase):
     def test_different_randomness_gives_a_different_ciphertext(self) -> None:
         # And `r` is actually read: an `encrypt` that ignored it would be
         # deterministic too, and every round trip would still pass.
-        ek, m, _ = _encrypt_inputs(ML_KEM_768.name)
+        ek, m, _ = _encrypt_inputs(ML_KEM_768)
         first = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE), **_768_ENCRYPT)
         second = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE) + 1, **_768_ENCRYPT)
         self.assertNotEqual(to_bytes(first), to_bytes(second))
 
     def test_the_traced_ciphertext_matches_the_eager_one(self) -> None:
-        args = _encrypt_inputs(ML_KEM_768.name)
+        args = _encrypt_inputs(ML_KEM_768)
         traced = frx.jit(lambda ek, m, r: _k_pke.encrypt(ek, m, r, **_768_ENCRYPT))
         self.assertEqual(
             to_bytes(traced(*args)), to_bytes(_k_pke.encrypt(*args, **_768_ENCRYPT))
@@ -181,13 +181,7 @@ class RoundTripTest(parameterized.TestCase):
     def test_decrypt_recovers_the_message_across_the_batch(
         self, params: MlKemParams
     ) -> None:
-        k, eta1, eta2, du, dv = (
-            params.k,
-            params.eta1,
-            params.eta2,
-            params.du,
-            params.dv,
-        )
+        k, eta1, eta2, du, dv = params.k, params.eta1, params.eta2, params.du, params.dv
         rng = np.random.default_rng(len(params.name))
         batch = 4
         ek, dk = _k_pke.key_gen(

@@ -35,6 +35,7 @@ from enc_frx.kem import Kem
 from enc_frx.ml_kem import _k_pke, encoding
 from enc_frx.ml_kem.ml_kem import MlKem
 from enc_frx.ml_kem.params import (
+    ML_KEM_512,
     ML_KEM_768,
     ML_KEM_1024,
     PARAMETER_SETS,
@@ -44,21 +45,20 @@ from enc_frx.ml_kem.params import (
 from enc_frx.ml_kem.testing import cctv_vectors
 from enc_frx.testing.kat import to_bytes
 
-_SCHEMES = {params.name: MlKem(params) for params in PARAMETER_SETS}
 _NAMED = tuple((params.name, params) for params in PARAMETER_SETS)
 
 # FIPS 203 Table 3, transcribed: `(encapsulation key, decapsulation key,
 # ciphertext)`. The scheme computes these from `k`, `du` and `dv`, so a formula
 # and a transcription of the answer are what have to agree.
 _TABLE_3 = {
-    "ML-KEM-512": (800, 1632, 768),
-    "ML-KEM-768": (1184, 2400, 1088),
-    "ML-KEM-1024": (1568, 3168, 1568),
+    ML_KEM_512: (800, 1632, 768),
+    ML_KEM_768: (1184, 2400, 1088),
+    ML_KEM_1024: (1568, 3168, 1568),
 }
 
 # ML-KEM-768 for the cases that are about the transform rather than about the
 # numbers, so they run once instead of three times.
-_768 = _SCHEMES[ML_KEM_768.name]
+_768 = MlKem(ML_KEM_768)
 _BATCH = 4
 
 # `cond` and `while` as jaxpr primitives — a decapsulation that branched on
@@ -66,8 +66,8 @@ _BATCH = 4
 _BRANCH = re.compile(r"\b(cond|while)\[")
 
 
-def _published(parameter_set: str, name: str, index: int = 0) -> np.ndarray:
-    return cctv_vectors.intermediate(parameter_set).array_at(name, index)
+def _published(params: MlKemParams, name: str, index: int = 0) -> np.ndarray:
+    return cctv_vectors.intermediate(params.name).array_at(name, index)
 
 
 def _j(z: np.ndarray, c: np.ndarray) -> bytes:
@@ -89,8 +89,8 @@ class PublishedRunTest(parameterized.TestCase):
     def test_encaps_matches_the_published_ciphertext_and_secret(
         self, params: MlKemParams
     ) -> None:
-        c, shared = _SCHEMES[params.name].encaps(
-            _published(params.name, "ek"), randomness=_published(params.name, "m")
+        c, shared = MlKem(params).encaps(
+            _published(params, "ek"), randomness=_published(params, "m")
         )
         vectors = cctv_vectors.intermediate(params.name)
         self.assertEqual(to_bytes(c), vectors.hex_at("c"))
@@ -103,8 +103,8 @@ class PublishedRunTest(parameterized.TestCase):
         # The seam's randomness argument and the standard's derandomized entry
         # point are the same operation here, and a harness driving one must not
         # be driving something else.
-        scheme = _SCHEMES[params.name]
-        ek, m = _published(params.name, "ek"), _published(params.name, "m")
+        scheme = MlKem(params)
+        ek, m = _published(params, "ek"), _published(params, "m")
         self.assertEqual(
             [to_bytes(part) for part in scheme.encaps(ek, randomness=m)],
             [to_bytes(part) for part in scheme.encaps_internal(ek, m)],
@@ -112,9 +112,7 @@ class PublishedRunTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*_NAMED)
     def test_decaps_recovers_the_published_secret(self, params: MlKemParams) -> None:
-        got = _SCHEMES[params.name].decaps(
-            _published(params.name, "dk"), _published(params.name, "c")
-        )
+        got = MlKem(params).decaps(_published(params, "dk"), _published(params, "c"))
         self.assertEqual(
             to_bytes(got), cctv_vectors.intermediate(params.name).hex_at("K")
         )
@@ -130,11 +128,11 @@ class PublishedRunTest(parameterized.TestCase):
         — which the file publishes as `KBar`. A ciphertext corruption cannot
         reach it: it changes the value being derived.
         """
-        scheme = _SCHEMES[params.name]
-        dk = _published(params.name, "dk").copy()
+        scheme = MlKem(params)
+        dk = _published(params, "dk").copy()
         # `dk = dk_PKE ‖ ek ‖ H(ek) ‖ z`, so the hash starts 64 bytes from the end.
         dk[-2 * SEED_SIZE] ^= 1
-        got = scheme.decaps(dk, _published(params.name, "c"))
+        got = scheme.decaps(dk, _published(params, "c"))
         self.assertEqual(
             to_bytes(got), cctv_vectors.intermediate(params.name).hex_at("KBar")
         )
@@ -146,10 +144,10 @@ class PublishedRunTest(parameterized.TestCase):
         # Not merely "a different secret": the expected value is computed from
         # `hashlib`, so a rejection path deriving with `H` instead of `J`, or
         # over the wrong `z`, fails here rather than passing as "different".
-        scheme = _SCHEMES[params.name]
-        c = _flip(_published(params.name, "c"), 0)
-        z = _published(params.name, "z")
-        got = scheme.decaps(_published(params.name, "dk"), c)
+        scheme = MlKem(params)
+        c = _flip(_published(params, "c"), 0)
+        z = _published(params, "z")
+        got = scheme.decaps(_published(params, "dk"), c)
         self.assertEqual(to_bytes(got), _j(z, c))
 
     @parameterized.named_parameters(*_NAMED)
@@ -163,18 +161,18 @@ class PublishedRunTest(parameterized.TestCase):
         transform adds: which field holds what, that the hash is `H` and not `G`,
         and that `z` arrives from the seed rather than from anywhere else.
         """
-        scheme = _SCHEMES[params.name]
+        scheme = MlKem(params)
         vectors = cctv_vectors.intermediate(params.name)
         framed = encoding.encode_dk(
-            _published(params.name, "dkPKE", 0),
-            _published(params.name, "ek"),
-            _published(params.name, "H(ek)"),
-            _published(params.name, "z"),
+            _published(params, "dkPKE", 0),
+            _published(params, "ek"),
+            _published(params, "H(ek)"),
+            _published(params, "z"),
         )
         self.assertEqual(to_bytes(framed), vectors.hex_at("dk"))
 
-        z = _published(params.name, "z")
-        ek, dk = scheme.keygen(np.concatenate([_published(params.name, "d"), z]))
+        z = _published(params, "z")
+        ek, dk = scheme.keygen(np.concatenate([_published(params, "d"), z]))
         _, ek_field, hash_field, z_field = encoding.decode_dk(dk, params.k)
         self.assertEqual(to_bytes(ek_field), to_bytes(ek))
         self.assertEqual(to_bytes(hash_field), hashlib.sha3_256(to_bytes(ek)).digest())
@@ -184,7 +182,7 @@ class PublishedRunTest(parameterized.TestCase):
     def test_a_generated_key_round_trips(self, params: MlKemParams) -> None:
         # The published run enters at `ek`/`dk`; this is the only case that
         # drives the amended key generation into the transform.
-        scheme = _SCHEMES[params.name]
+        scheme = MlKem(params)
         rng = np.random.default_rng(len(params.name))
         seed = rng.integers(0, 256, scheme.seed_size, dtype=np.uint8)
         m = rng.integers(0, 256, scheme.randomness_size, dtype=np.uint8)
@@ -294,22 +292,22 @@ class KeyCheckTest(absltest.TestCase):
     """FIPS 203 §7.2 and §7.3 as standalone operations, and folded into `decaps`."""
 
     def test_the_published_keys_pass_both_checks(self) -> None:
-        self.assertTrue(_768.check_encapsulation_key(_published(ML_KEM_768.name, "ek")))
-        self.assertTrue(_768.check_decapsulation_key(_published(ML_KEM_768.name, "dk")))
+        self.assertTrue(_768.check_encapsulation_key(_published(ML_KEM_768, "ek")))
+        self.assertTrue(_768.check_decapsulation_key(_published(ML_KEM_768, "dk")))
 
     def test_an_unreduced_coefficient_fails_the_encapsulation_key_check(self) -> None:
         # The first 12-bit value becomes 0xfff = 4095, which is not below `q`.
-        ek = _published(ML_KEM_768.name, "ek").copy()
+        ek = _published(ML_KEM_768, "ek").copy()
         ek[0], ek[1] = 0xFF, 0xFF
         self.assertFalse(_768.check_encapsulation_key(ek))
 
     def test_halves_that_disagree_fail_the_decapsulation_key_check(self) -> None:
-        dk = _published(ML_KEM_768.name, "dk").copy()
+        dk = _published(ML_KEM_768, "dk").copy()
         dk[-2 * SEED_SIZE] ^= 1
         self.assertFalse(_768.check_decapsulation_key(dk))
 
     def test_a_key_check_is_per_entry_over_a_batch(self) -> None:
-        good = _published(ML_KEM_768.name, "ek")
+        good = _published(ML_KEM_768, "ek")
         bad = good.copy()
         bad[0], bad[1] = 0xFF, 0xFF
         got = _768.check_encapsulation_key(np.stack([good, bad, good]))
@@ -319,13 +317,13 @@ class KeyCheckTest(absltest.TestCase):
         """§7.2's check reaches `decaps` through the rejection path, not an
         exception — the same channel a bad ciphertext takes, for the same
         reason."""
-        dk = _published(ML_KEM_768.name, "dk").copy()
-        c = _published(ML_KEM_768.name, "c")
+        dk = _published(ML_KEM_768, "dk").copy()
+        c = _published(ML_KEM_768, "c")
         # The embedded `ek` starts where `dk_PKE` ends.
         start = ML_KEM_768.decryption_key_size
         dk[start], dk[start + 1] = 0xFF, 0xFF
         got = _768.decaps(dk, c)
-        self.assertEqual(to_bytes(got), _j(_published(ML_KEM_768.name, "z"), c))
+        self.assertEqual(to_bytes(got), _j(_published(ML_KEM_768, "z"), c))
 
 
 class SeamTest(parameterized.TestCase):
@@ -334,14 +332,9 @@ class SeamTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*_NAMED)
     def test_the_sizes_are_the_standards(self, params: MlKemParams) -> None:
-        """FIPS 203 Table 3, as published rather than as recomputed.
-
-        The scheme derives its sizes from `k`, `du` and `dv`, so comparing them
-        against the same formulas would agree with any consistent mistake. These
-        are the standard's own literals.
-        """
-        scheme = _SCHEMES[params.name]
-        encapsulation, decapsulation, ciphertext = _TABLE_3[params.name]
+        """FIPS 203 Table 3, as published rather than as recomputed."""
+        scheme = MlKem(params)
+        encapsulation, decapsulation, ciphertext = _TABLE_3[params]
         self.assertEqual(scheme.encapsulation_key_size, encapsulation)
         self.assertEqual(scheme.decapsulation_key_size, decapsulation)
         self.assertEqual(scheme.ciphertext_size, ciphertext)
@@ -355,32 +348,34 @@ class SeamTest(parameterized.TestCase):
         twin = MlKem(ML_KEM_768)
         self.assertEqual(_768, twin)
         self.assertEqual(hash(_768), hash(twin))
-        self.assertNotEqual(_768, _SCHEMES[ML_KEM_1024.name])
+        self.assertNotEqual(_768, MlKem(ML_KEM_1024))
 
     def test_two_instances_of_one_set_share_a_trace(self) -> None:
         """What value-based equality buys, asserted as the cost it avoids.
 
         A scheme reaches a traced function as a static argument, where it is
         compared by `__eq__` against the cache. The equality test above says the
-        comparison answers `True`; this says the cache believes it, which is the
-        property that actually fails when a future field is left out of the
-        dataclass.
+        comparison answers `True`; this says the cache believes it, and identity
+        equality — which would not error anywhere else — traces twice here.
+
+        The body is the cheapest method that still reads the set (`params.k`
+        sizes the slice), because what is being counted is decided before
+        tracing starts: a real encapsulation would compile K-PKE to assert a
+        dictionary lookup.
         """
         traces = 0
 
         @functools.partial(frx.jit, static_argnums=0)
-        def encapsulate(scheme: MlKem, ek: np.ndarray, m: np.ndarray) -> frx.Array:
+        def check(scheme: MlKem, ek: np.ndarray) -> frx.Array:
             nonlocal traces
             traces += 1
-            return scheme.encaps_internal(ek, m)[0]
+            return scheme.check_encapsulation_key(ek)
 
-        ek = _published(ML_KEM_768.name, "ek")
-        m = _published(ML_KEM_768.name, "m")
-        first = encapsulate(MlKem(ML_KEM_768), ek, m)
-        second = encapsulate(MlKem(ML_KEM_768), ek, m)
+        ek = _published(ML_KEM_768, "ek")
+        check(MlKem(ML_KEM_768), ek)
+        check(MlKem(ML_KEM_768), ek)
 
         self.assertEqual(traces, 1)
-        np.testing.assert_array_equal(np.asarray(first), np.asarray(second))
 
     def test_rejects_wrong_lengths(self) -> None:
         zeros = np.zeros(_768.decapsulation_key_size, dtype=np.uint8)

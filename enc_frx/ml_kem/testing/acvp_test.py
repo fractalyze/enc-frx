@@ -92,9 +92,6 @@ _KEY_CHECKS = {
     ),
 }
 
-# `MlKemParams.name` is ACVP's `parameterSet` verbatim, so the join between a
-# published case and the instance it was generated for is derived rather than
-# kept by hand — the file publishes the one column nothing here can compute.
 _NAMED = tuple((params.name, params) for params in PARAMETER_SETS)
 
 _NAMED_KEY_CHECKS = tuple(

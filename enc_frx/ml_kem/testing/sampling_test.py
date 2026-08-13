@@ -33,8 +33,6 @@ from enc_frx.ml_kem.params import ML_KEM_512, PARAMETER_SETS, MlKemParams, N
 from enc_frx.ml_kem.testing import cctv_vectors
 from enc_frx.ml_kem.testing import fips203_reference as ref
 
-# The named sets under the name each carries, hoisted because three
-# `named_parameters` decorators would otherwise carry copies of one projection.
 _NAMED = tuple((params.name, params) for params in PARAMETER_SETS)
 
 

@@ -70,16 +70,8 @@ class MlKemParams:
     `parameterSet` is this string verbatim, so it is the join between a published
     case and the set that case was generated for.
 
-    Frozen, so `__eq__` and `__hash__` are by value — which is what the `Kem`
-    seam requires of the scheme that carries this (`enc_frx/kem.py`). A scheme
-    instance rides pytree aux, where identity equality does not error: it
-    silently re-traces the enclosing jit zone for every freshly built instance,
-    and that surfaces as a slow call rather than as a failure.
-
-    Everything here shapes the trace rather than riding in it. `k` sets the shape
-    of every array in the scheme, so it is a Python `int` and never a traced
-    value, and the sizes below are static for the same reason — the seam promises
-    them to a consumer that allocates before it calls.
+    Frozen, so `__eq__` and `__hash__` are by value — what the `Kem` seam
+    requires of the scheme that carries this (`enc_frx/kem.py`).
     """
 
     name: str
@@ -109,10 +101,9 @@ class MlKemParams:
         return ciphertext_size(self.k, self.du, self.dv)
 
 
-# FIPS 203 Table 2. Two of the three differ from ML-KEM-768 in a code path
-# rather than only in a width: `eta1` is 3 at ML-KEM-512 alone, which is the
-# second centered-binomial width, and `du`/`dv` change at ML-KEM-1024 alone,
-# which is the second compression width.
+# FIPS 203 Table 2. Why all three are gated rather than only the default —
+# two of them reach a code path the default never does — is in
+# `docs/schemes/ml-kem.md`.
 ML_KEM_512 = MlKemParams(name="ML-KEM-512", k=2, eta1=3, eta2=2, du=10, dv=4)
 ML_KEM_768 = MlKemParams(name="ML-KEM-768", k=3, eta1=2, eta2=2, du=10, dv=4)
 ML_KEM_1024 = MlKemParams(name="ML-KEM-1024", k=4, eta1=2, eta2=2, du=11, dv=5)

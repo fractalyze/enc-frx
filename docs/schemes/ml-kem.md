@@ -46,11 +46,6 @@ disagrees, which is not a rejection and produces no signal that it happened. The
 are far below anything reachable, and they are here because the number a reader
 would otherwise assume is zero.
 
-`MlKemParams` derives the size columns from `k`, `d_u` and `d_v` rather than
-transcribing them; the published literals live in
-[`ml_kem_test.py`](../../enc_frx/ml_kem/testing/ml_kem_test.py), so a wrong
-formula and a wrong transcription have to agree before either passes.
-
 §8 recommends ML-KEM-768 as the default. This repo has no default: the seam
 takes a set, because a scheme that picked one for the caller is a security
 decision made where nobody reviews it.
