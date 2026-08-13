@@ -32,7 +32,7 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 from enc_frx.kem import Kem
-from enc_frx.ml_kem import _k_pke, encoding
+from enc_frx.ml_kem import _k_pke, encoding, sampling
 from enc_frx.ml_kem.ml_kem import MlKem
 from enc_frx.ml_kem.params import (
     ML_KEM_512,
@@ -326,9 +326,161 @@ class KeyCheckTest(absltest.TestCase):
         self.assertEqual(to_bytes(got), _j(_published(ML_KEM_768, "z"), c))
 
 
+class PrecomputedDecapsTest(absltest.TestCase):
+    """`precompute_decaps` / `decaps_precomputed`: one key, many ciphertexts.
+
+    A *narrower* operation than the seam's `decaps`, not a faster one — so what
+    these check is first that it answers identically, and then that it is
+    actually narrower rather than quietly accepting the batch of keys it cannot
+    serve.
+    """
+
+    def test_it_answers_exactly_what_the_seam_answers(self) -> None:
+        """Including the rejections, and per entry.
+
+        A mixed batch rather than an all-valid one: the whole point of the
+        precomputed path is that `key_ok` is now a single value AND-ed into
+        every entry, and an implementation that reduced the ciphertext
+        comparison over the batch alongside it would pass an all-valid and an
+        all-invalid case alike.
+        """
+        dk, ciphertexts, secrets, z = _same_key_batch()
+        corrupted = (1, 2)
+        mixed = ciphertexts.copy()
+        for entry in corrupted:
+            mixed[entry] = _flip(mixed[entry], 0)
+
+        got = np.asarray(_768.decaps_precomputed(_768.precompute_decaps(dk), mixed))
+        np.testing.assert_array_equal(
+            got,
+            np.asarray(_768.decaps(np.broadcast_to(dk, (_BATCH, dk.shape[-1])), mixed)),
+            "the precomputed path diverged from the seam",
+        )
+        for entry in range(_BATCH):
+            want = _j(z, mixed[entry]) if entry in corrupted else bytes(secrets[entry])
+            self.assertEqual(bytes(got[entry]), want, f"entry {entry}")
+
+    def test_the_matrix_is_expanded_for_one_key_rather_than_for_every_entry(
+        self,
+    ) -> None:
+        """The win, asserted as work that moved rather than as elapsed time.
+
+        `Â` is a function of `ρ` alone, so the seam expands `[B, k, k, 256]` of
+        it for a batch whose keys happen to be equal — XLA cannot know the rows
+        are equal, because `ρ` is traced data and not shape. The hoisted path
+        expands `[k, k, 256]` once and none per ciphertext, and those two shapes
+        differing by exactly the batch axis is the whole claim.
+        """
+        dk, ciphertexts, _, _ = _same_key_batch()
+        original = sampling.expand_matrix
+        shapes: list[tuple[int, ...]] = []
+
+        def _record(rho: object, k: int) -> object:
+            expanded = original(rho, k)
+            shapes.append(tuple(expanded.shape))
+            return expanded
+
+        with mock.patch.object(sampling, "expand_matrix", _record):
+            _768.decaps(np.broadcast_to(dk, (_BATCH, dk.shape[-1])), ciphertexts)
+            seam = shapes.pop()
+
+            precomputed = _768.precompute_decaps(dk)
+            hoisted = shapes.pop()
+
+            _768.decaps_precomputed(precomputed, ciphertexts)
+            self.assertEmpty(shapes, "decaps_precomputed expanded the matrix again")
+
+        self.assertEqual(seam, (_BATCH, *hoisted))
+
+    def test_a_batch_of_keys_is_refused(self) -> None:
+        """The restriction is a shape error, not a docstring.
+
+        Entry `i` of `decaps` belongs to `key[i]`; this pair has one key for the
+        whole batch. Broadcasting a batched key here would answer every entry
+        under `key[0]` — plausible bytes, wrong for every entry but the first,
+        and nothing raised.
+        """
+        dk, _, _, _ = _same_key_batch()
+        with self.assertRaisesRegex(ValueError, "takes one key"):
+            _768.precompute_decaps(np.broadcast_to(dk, (_BATCH, dk.shape[-1])))
+
+    def test_a_malformed_key_rejects_rather_than_raising(self) -> None:
+        """§7.2 and §7.3 moved to `precompute_decaps`, and neither gained a
+        failure channel on the way.
+
+        Both sections separately, because they are checked together here and a
+        `key_ok` that dropped one would still reject the other's cases.
+        """
+        dk, ciphertexts, _, z = _same_key_batch()
+        start = ML_KEM_768.decryption_key_size
+        unreduced = dk.copy()  # §7.2: the embedded `ek`'s first coefficient.
+        unreduced[start], unreduced[start + 1] = 0xFF, 0xFF
+        disagreeing = dk.copy()  # §7.3: `H(ek)` no longer matches `ek`.
+        disagreeing[-2 * SEED_SIZE] ^= 1
+
+        for name, malformed in (("§7.2", unreduced), ("§7.3", disagreeing)):
+            got = _768.decaps_precomputed(
+                _768.precompute_decaps(malformed), ciphertexts
+            )
+            for entry in range(_BATCH):
+                self.assertEqual(
+                    bytes(np.asarray(got)[entry]),
+                    _j(z, ciphertexts[entry]),
+                    f"{name}, entry {entry}",
+                )
+
+    def test_the_precomputed_path_has_no_branch(self) -> None:
+        # Same requirement as `decaps`: `key_ok` is a value AND-ed into a mask,
+        # so a `cond` on it would be the timing signal the transform withholds.
+        dk, ciphertexts, _, _ = _same_key_batch()
+        text = str(
+            frx.make_jaxpr(_768.decaps_precomputed)(
+                _768.precompute_decaps(dk), ciphertexts
+            )
+        )
+        self.assertIn("select_n", text, "decaps_precomputed traced without a select")
+        self.assertIsNone(_BRANCH.search(text), "decaps_precomputed traced to a branch")
+
+    def test_the_traced_secret_matches_the_eager_one(self) -> None:
+        dk, ciphertexts, _, _ = _same_key_batch()
+        precomputed = _768.precompute_decaps(dk)
+        np.testing.assert_array_equal(
+            np.asarray(frx.jit(_768.decaps_precomputed)(precomputed, ciphertexts)),
+            np.asarray(_768.decaps_precomputed(precomputed, ciphertexts)),
+        )
+
+    def test_the_parsed_key_holds_no_secret_vector(self) -> None:
+        """`ŝ` stays encoded, which is what keeps this value's handling
+        requirements the same as the encapsulation key's.
+
+        `dk_pke` is carried as the bytes `decode_dk` produced — the same bytes
+        already inside the key the caller handed over — so nothing here is a
+        parsed secret. A field holding `ŝ` as field elements would be a new kind
+        of object for `docs/reference/security.md` to have an opinion about.
+        """
+        dk, _, _, _ = _same_key_batch()
+        precomputed = _768.precompute_decaps(dk)
+        np.testing.assert_array_equal(
+            np.asarray(precomputed.dk_pke),
+            dk[: ML_KEM_768.decryption_key_size],
+        )
+
+
 class SeamTest(parameterized.TestCase):
     def test_the_protocol_accepts_the_scheme(self) -> None:
         self.assertIsInstance(_768, Kem)
+
+    def test_the_protocol_does_not_gain_the_precomputed_pair(self) -> None:
+        """The pair lives on `MlKem`, below the seam, like `encaps_internal`.
+
+        A protocol method returning a scheme-shaped opaque value would make
+        generic code hold ML-KEM-shaped state, which is the coupling the seam
+        exists to prevent — and it would not generalize, since a hybrid KEM has
+        no `Â` (`enc_frx/kem.py`).
+        """
+        for name in ("precompute_decaps", "decaps_precomputed"):
+            self.assertTrue(hasattr(MlKem, name))
+            self.assertFalse(hasattr(Kem, name), f"Kem gained {name}")
 
     @parameterized.named_parameters(*_NAMED)
     def test_the_sizes_are_the_standards(self, params: MlKemParams) -> None:
@@ -412,6 +564,28 @@ def _batch() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         np.asarray(ciphertexts),
         np.asarray(secrets),
         seeds[:, SEED_SIZE:],
+    )
+
+
+def _same_key_batch() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """`(dk, ciphertexts, secrets, z)` at 768 — one key, `_BATCH` ciphertexts.
+
+    The shape `precompute_decaps` serves and the published corpus does not
+    contain: ACVP's decapsulation group is ten independent keys.
+    """
+    rng = np.random.default_rng(1)
+    seed = rng.integers(0, 256, _768.seed_size, dtype=np.uint8)
+    encaps_key, decaps_key = _768.keygen(seed)
+    m = rng.integers(0, 256, (_BATCH, _768.randomness_size), dtype=np.uint8)
+    ciphertexts, secrets = _768.encaps(
+        np.broadcast_to(np.asarray(encaps_key), (_BATCH, _768.encapsulation_key_size)),
+        randomness=m,
+    )
+    return (
+        np.asarray(decaps_key),
+        np.asarray(ciphertexts),
+        np.asarray(secrets),
+        seed[SEED_SIZE:],
     )
 
 

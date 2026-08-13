@@ -76,6 +76,12 @@ _BUDGET = flags.DEFINE_float(
 _STAGE_BATCH = flags.DEFINE_integer(
     "stage_batch", 256, "batch size for the per-stage breakdown; 0 skips it"
 )
+_SWEEP = flags.DEFINE_bool(
+    "sweep", True, "the end-to-end encaps/decaps table by batch size"
+)
+_HOIST = flags.DEFINE_bool(
+    "hoist", True, "compare the seam against the precomputed path over one key"
+)
 _REFERENCE_SECONDS = flags.DEFINE_integer(
     "reference_seconds", 1, "seconds per OpenSSL reference measurement; 0 skips it"
 )
@@ -209,6 +215,66 @@ def _sweep(
             f"{encaps.warm_s * 1e3:>10.2f}ms  {decaps.compile_s:>13.2f}s  "
             f"{decaps.warm_s * 1e3:>10.2f}ms  {per_op * 1e6:>9.1f}us  "
             f"{1 / per_op:>10.0f}  {decaps.warm_s / encaps.warm_s:>5.2f}x"
+        )
+
+
+def _same_key_material(
+    scheme: MlKem, batch: int, rng: np.random.Generator
+) -> tuple[Array, Array, Array]:
+    """`(dk, dk tiled to [B], ciphertexts)` — one key, `batch` ciphertexts.
+
+    The workload the hoist is for, and the one `_material` above does not build:
+    a server holding one long-lived key against traffic from many senders. The
+    tiled copy is what that server passes the seam today, and it is arm A below.
+    """
+    seed = fnp.asarray(rng.integers(0, 256, scheme.seed_size, dtype=np.uint8))
+    ek, dk = frx.block_until_ready(frx.jit(scheme.keygen)(seed))
+    m = fnp.asarray(rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8))
+    c, _ = frx.block_until_ready(
+        frx.jit(scheme.encaps_internal)(
+            fnp.broadcast_to(ek, (batch, scheme.encapsulation_key_size)), m
+        )
+    )
+    return dk, fnp.broadcast_to(dk, (batch, scheme.decapsulation_key_size)), c
+
+
+def _hoist(
+    params: MlKemParams, batches: Sequence[int], rng: np.random.Generator
+) -> None:
+    """The seam against the precomputed path, over one key.
+
+    **Both arms in one process**, which is not a stylistic choice here: the two
+    differ by a few percent at small `B`, and compile-cache and process state
+    move a cross-process comparison by more than that — in sign as well as in
+    size (`CLAUDE.md`).
+
+    `precompute` is a per-*key* cost, not a per-batch one, so it is reported in
+    its own column rather than added to either arm. A server pays it once when
+    it loads its key and never again; dividing it across one batch would
+    describe a caller that reloads its key per request, which is the workload
+    this pair does not serve.
+    """
+    scheme = MlKem(params)
+    _say(f"\n{params.name} same-key batch: the seam against the precomputed path")
+    _say(
+        f"  {'B':>6}  {'decaps warm':>12}  {'precomputed':>12}  {'speedup':>8}  "
+        f"{'precompute':>11}  {'per op':>10}"
+    )
+    for batch in batches:
+        dk, tiled, c = _same_key_material(scheme, batch, rng)
+        seam = _time(scheme.decaps, tiled, c)
+        parse = _time(scheme.precompute_decaps, dk)
+        precomputed = frx.block_until_ready(frx.jit(scheme.precompute_decaps)(dk))
+        hoisted = _time(scheme.decaps_precomputed, precomputed, c)
+        if seam is None or hoisted is None or parse is None:
+            _say(f"  {batch:>6}  {'(unavailable at this batch size)':>60}")
+            continue
+        _say(
+            f"  {batch:>6}  {seam.warm_s * 1e3:>10.2f}ms  "
+            f"{hoisted.warm_s * 1e3:>10.2f}ms  "
+            f"{seam.warm_s / hoisted.warm_s:>7.2f}x  "
+            f"{parse.warm_s * 1e3:>9.2f}ms  "
+            f"{hoisted.per_op(batch) * 1e6:>8.1f}us"
         )
 
 
@@ -381,8 +447,12 @@ def main(argv: list[str]) -> None:
             f"{floor.warm_s * 1e3:.3f}ms warm — nothing below this is ML-KEM"
         )
 
-    for params in chosen:
-        _sweep(params, batches, rng)
+    if _SWEEP.value:
+        for params in chosen:
+            _sweep(params, batches, rng)
+    if _HOIST.value:
+        for params in chosen:
+            _hoist(params, batches, rng)
     if _STAGE_BATCH.value:
         for params in chosen:
             _breakdown(params, _STAGE_BATCH.value, rng)

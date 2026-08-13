@@ -265,6 +265,99 @@ class MalformedKeyTest(parameterized.TestCase):
             self.assertEqual(bytes(got[index]), want, vector.case_id)
 
 
+class PrecomputedPathTest(parameterized.TestCase):
+    """The same corpus through `precompute_decaps` / `decaps_precomputed`.
+
+    The pair is below the seam and `check_kem` drives the seam, so the published
+    cases reach it here instead. That is not a formality: the precomputed path
+    computes `Â`, `H(ek)` and both key checks somewhere else and at a different
+    time, and a corpus that only ever ran through `decaps` would not see a
+    single one of those move.
+
+    **One case at a time, because ACVP publishes a distinct `dk` per case.** The
+    decapsulation group is ten independent keys, not one key against ten
+    ciphertexts, so it cannot be handed to this pair as one batch — which is the
+    restriction the pair exists to name. `ml_kem_test.py` builds the same-key
+    batch the vectors do not contain.
+    """
+
+    @parameterized.named_parameters(*_NAMED)
+    def test_every_published_decapsulation_is_reproduced(
+        self, params: MlKemParams
+    ) -> None:
+        vectors = _group(params, "decapsulation")
+        self.assertNotEmpty(vectors)
+        scheme = MlKem(params)
+        for vector in vectors:
+            assert vector.decapsulation_key is not None
+            assert vector.ciphertext is not None
+            precomputed = scheme.precompute_decaps(
+                _stack([vector.decapsulation_key])[0]
+            )
+            got = scheme.decaps_precomputed(precomputed, _stack([vector.ciphertext]))
+            self.assertEqual(
+                to_bytes(got[0]), vector.shared_secret, f"{vector.case_id} byte-exact"
+            )
+            # Against the seam as well as against the file: the two paths must
+            # not merely both be plausible, they must be the same function.
+            np.testing.assert_array_equal(
+                np.asarray(got),
+                np.asarray(
+                    scheme.decaps(
+                        _stack([vector.decapsulation_key]), _stack([vector.ciphertext])
+                    )
+                ),
+                f"{vector.case_id}: the precomputed path diverged from the seam",
+            )
+
+    @parameterized.named_parameters(*_NAMED)
+    def test_a_published_malformed_key_rejects_rather_than_raising(
+        self, params: MlKemParams
+    ) -> None:
+        """The property the whole precomputed path risks, on published keys.
+
+        `precompute_decaps` is where §7.2 and §7.3 now run, and it is the one
+        place in this design that could plausibly have been written to raise —
+        it looks like a parse, it holds the answer, and there is no batch axis
+        forcing a value. So the malformed half of this group has to reach the
+        rejection secret through it, not an exception, and the valid half has to
+        still return the sender's own secret through the same call.
+
+        Same construction as `MalformedKeyTest`: every key is encapsulated *to*,
+        using the `ek` that key itself carries, so a valid and a malformed key
+        answer the *same* ciphertext differently. Handing every key a ciphertext
+        from elsewhere would fail re-encryption on its own and prove nothing.
+        """
+        scheme = MlKem(params)
+        vectors = _group(params, "decapsulationKeyCheck")
+        self.assertNotEmpty(vectors)
+        published = [vector.valid for vector in vectors]
+        self.assertIn(True, published)
+        self.assertIn(False, published)
+
+        keys = _stack([vector.decapsulation_key for vector in vectors])  # type: ignore[misc]
+        _, embedded, _, z = encoding.decode_dk(keys, params.k)
+        randomness = np.arange(len(vectors) * SEED_SIZE, dtype=np.uint8).reshape(
+            len(vectors), SEED_SIZE
+        )
+        ciphertexts, secrets = scheme.encaps(embedded, randomness=randomness)
+
+        for index, vector in enumerate(vectors):
+            # No `assertRaises` guard: an exception here fails the test by
+            # escaping, and naming it would suggest the alternative was ever on
+            # the table.
+            precomputed = scheme.precompute_decaps(keys[index])
+            got = scheme.decaps_precomputed(
+                precomputed, np.asarray(ciphertexts)[index : index + 1]
+            )
+            want = (
+                to_bytes(secrets[index])
+                if vector.valid
+                else _j(bytes(np.asarray(z)[index]), to_bytes(ciphertexts[index]))
+            )
+            self.assertEqual(to_bytes(got[0]), want, vector.case_id)
+
+
 class CorpusTest(absltest.TestCase):
     def test_every_published_case_is_driven_by_something(self) -> None:
         """The partition covers the corpus, and neither half is empty.

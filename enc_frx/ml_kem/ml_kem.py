@@ -42,6 +42,15 @@ hash check alone, so `check_decapsulation_key` answers what ACVP's
 `decapsulationKeyCheck` asks and nothing more, while `decaps` also runs §7.2 over
 the embedded encapsulation key — which it is about to encrypt with.
 
+**`precompute_decaps` is the import step the seam does not have**, and it does
+not change that answer. A key parsed once is checked once, so both sections run
+there rather than per ciphertext — but the result is carried on the parsed value
+and AND-ed into every later acceptance, because a `precompute` that raised would
+put the withheld bit back at a new door. The pair it forms with
+`decaps_precomputed` is a *narrower* operation than `decaps`, not a faster one:
+one key for the whole batch against `decaps`'s one key per entry, which is why
+it takes a rank-1 key and refuses a batched one rather than broadcasting.
+
 **Randomness is an argument.** `encaps` takes `m` rather than drawing it, so the
 whole scheme is a function of its inputs; `encaps_internal` is the same call
 under the standard's own name for the derandomized entry point, which is what a
@@ -53,15 +62,63 @@ leading axis works and `frx.vmap` covers the caller that wants one.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import frx.numpy as fnp
 from frx import Array
 from frx.typing import ArrayLike
 
 from enc_frx.kem import Kem
-from enc_frx.ml_kem import _k_pke, encoding, hashes
+from enc_frx.ml_kem import _k_pke, encoding, hashes, ntt, sampling
 from enc_frx.ml_kem.params import POLY_BYTES, SEED_SIZE, MlKemParams
+
+
+class PrecomputedDecapsulationKey(NamedTuple):
+    """One decapsulation key, parsed once — everything in `decaps` that is a
+    function of the key alone.
+
+    Built by `MlKem.precompute_decaps` and consumed by
+    `MlKem.decaps_precomputed`, which together are a *narrower* operation than
+    the seam's `decaps` rather than a faster one: this is one key for a whole
+    batch, where `decaps` takes one key per entry.
+
+    **`key_ok` is why this is not just cached public data.** FIPS 203 §7.2 and
+    §7.3 are functions of the key, so a key parsed once is checked once — and
+    this seam has no failure channel to report the answer through, so the answer
+    rides here as a value and is AND-ed into the acceptance of every
+    decapsulation the key goes on to perform. A `precompute` that validated
+    eagerly and raised would reintroduce the bit the transform exists to
+    withhold, at a new door (`enc_frx/kem.py`).
+
+    **Every field is public.** `dk_pke` is carried as the bytes `decode_dk`
+    produced and is decoded to `ŝ` per call, so no secret vector is parsed or
+    held here beyond what the key's own encoding already is. That keeps this
+    value's handling requirements the same as the encapsulation key's, and it is
+    why `docs/reference/security.md` says nothing new about it.
+
+    Unbatched by construction — see `MlKem.precompute_decaps`.
+    """
+
+    a_hat: Array
+    """`Â = expand_matrix(ρ, k)`, `[k, k, 256]`: `k^2` independent `SampleNTT`
+    runs, and the largest Keccak stage of a decapsulation on CPU."""
+
+    t_hat: Array
+    """`ByteDecode_12(ek[:384k])` as field elements, `[k, 256]` — the other half
+    of what Algorithm 14 decodes before line 9."""
+
+    h_ek: Array
+    """`H(ek)`, `[32]`: one flat SHA3-256, and the only member of the
+    `H`/`J`/`G` group that does not need the ciphertext."""
+
+    dk_pke: Array
+    """K-PKE's `dk_PKE` as bytes, `[384k]` — decoded to `ŝ` per call."""
+
+    z: Array
+    """The implicit-rejection seed, `[32]`."""
+
+    key_ok: Array
+    """§7.2 and §7.3 over this key, as one `bool[]`."""
 
 
 class MlKem:
@@ -173,6 +230,100 @@ class MlKem:
         # lowers to a select, so both secrets are computed and the one that is
         # returned costs nothing to choose.
         return fnp.where(accepted[..., None], shared, rejected)
+
+    def precompute_decaps(
+        self, decapsulation_key: ArrayLike
+    ) -> PrecomputedDecapsulationKey:
+        """Parse one key for many ciphertexts: uint8 `[decapsulation_key_size]`.
+
+        Below the seam, on `MlKem` only — the `Kem` protocol does not gain a
+        method and no consumer of it is affected. `enc_frx/kem.py` reserves this
+        shape: a scheme parses its own encoding on entry, and one that wants a
+        parsed key across many calls exposes that here.
+
+        **Rank-1 by construction, and that is the safety property.** The seam's
+        `decaps` takes `[B, decapsulation_key_size]` — one key *per entry* —
+        while this pair takes one key for the whole batch. Those are different
+        operations, so a caller holding per-entry keys gets a `ValueError` here
+        rather than a plausible answer computed under the wrong key.
+
+        **Nothing raises on a malformed key.** The §7.2 and §7.3 checks run
+        here, once, and their answer is carried on the result rather than
+        reported — see `PrecomputedDecapsulationKey` for why an exception would
+        be the attack.
+        """
+        dk = encoding.checked_length(
+            decapsulation_key, self.decapsulation_key_size, "a decapsulation key"
+        )
+        if dk.ndim != 1:
+            raise ValueError(
+                "precompute_decaps takes one key, shaped "
+                f"[{self.decapsulation_key_size}], got {list(dk.shape)}. A batch "
+                "of keys is `decaps`, which pairs key `i` with ciphertext `i`."
+            )
+        dk_pke, ek, _, z = encoding.decode_dk(dk, self._params.k)
+        t_hat_ints, rho = encoding.decode_ek(ek, self._params.k)
+        return PrecomputedDecapsulationKey(
+            a_hat=sampling.expand_matrix(rho, self._params.k),
+            t_hat=ntt.as_field(t_hat_ints),
+            h_ek=hashes.h(ek),
+            dk_pke=dk_pke,
+            z=z,
+            # The same two predicates `decaps` folds into its reduction, and
+            # reached through the same methods so there is one definition of
+            # each. Their cost is paid once per key rather than per ciphertext.
+            key_ok=self.check_encapsulation_key(ek) & self.check_decapsulation_key(dk),
+        )
+
+    def decaps_precomputed(
+        self, precomputed: PrecomputedDecapsulationKey, ciphertext: ArrayLike
+    ) -> Array:
+        """Algorithm 18 for a batch under one key: `[B, c] -> [B, 32]`.
+
+        Identical to `decaps` in what it returns and how it rejects — the only
+        difference is that everything depending on the key alone was already
+        done by `precompute_decaps`. Always a shared secret, never a verdict,
+        and nothing raises.
+        """
+        params = self._params
+        c = encoding.checked_length(ciphertext, self.ciphertext_size, "a ciphertext")
+
+        m = _k_pke.decrypt(
+            precomputed.dk_pke, c, k=params.k, du=params.du, dv=params.dv
+        )
+        # The key's fields carry no batch axis, so the two concatenations state
+        # the broadcast the array arithmetic below gets for free.
+        shared, r = hashes.g(
+            fnp.concatenate([m, self._spread(precomputed.h_ek, m)], axis=-1)
+        )
+        rejected = hashes.j(
+            fnp.concatenate([self._spread(precomputed.z, c), c], axis=-1)
+        )
+
+        accepted = (
+            fnp.all(
+                _k_pke.encrypt_expanded(
+                    t_hat=precomputed.t_hat,
+                    a_hat=precomputed.a_hat,
+                    m=m,
+                    r=r,
+                    k=params.k,
+                    eta1=params.eta1,
+                    eta2=params.eta2,
+                    du=params.du,
+                    dv=params.dv,
+                )
+                == c,
+                axis=-1,
+            )
+            & precomputed.key_ok
+        )
+        return fnp.where(accepted[..., None], shared, rejected)
+
+    @staticmethod
+    def _spread(field: Array, batched: Array) -> Array:
+        """One of the key's `[L]` fields against a `[..., M]` batch."""
+        return fnp.broadcast_to(field, (*batched.shape[:-1], field.shape[-1]))
 
     def check_encapsulation_key(self, encapsulation_key: ArrayLike) -> Array:
         """FIPS 203 §7.2's modulus check, as a `bool[...]` per batch entry.
