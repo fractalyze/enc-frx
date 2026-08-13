@@ -95,15 +95,47 @@ makes no constant-time claim, and the items below are named rather than fixed.
 
 ## The gate
 
-C2SP's CCTV vectors, fetched and sha256-pinned in
-[`../../MODULE.bazel`](../../MODULE.bazel), in two sets that answer different
-questions.
+Two published corpora, fetched and sha256-pinned in
+[`../../MODULE.bazel`](../../MODULE.bazel), and they are not redundant. One is
+generated against the final standard and gates the scheme end to end; the other
+publishes the values in between, which is what pins each piece on its own.
+
+### NIST's ACVP sets
+
+`ML-KEM-keyGen-FIPS203` publishes `(d, z) -> (ek, dk)` and
+`ML-KEM-encapDecap-FIPS203` publishes the rest, at all three parameter sets.
+Every case runs on every PR through the harness's `check_kem`
+([`../../enc_frx/testing/kat.py`](../../enc_frx/testing/kat.py)), which adds the
+properties a published file cannot express: that the whole ciphertext is
+consumed, that rejection repeats, and that it is decided per batch entry.
+
+Two things about the set shape the tests around it.
+
+**No decapsulation case is marked as a rejection**, and that is correct rather
+than an omission — under implicit rejection a modified ciphertext yields a shared
+secret, so there is no verdict to publish. Every case carries an expected `k`, so
+comparing it exactly *is* the whole gate. There is no subset to single out, and
+no way to count or filter the rejections; what the harness enforces instead is
+that a run reaches decapsulation at all.
+
+**`encapDecap` publishes four functions, not two.** Beyond encapsulation and
+decapsulation it carries `encapsulationKeyCheck` and `decapsulationKeyCheck` —
+the §7.2 and §7.3 input validation, and the only groups here with a published
+verdict. The `Kem` seam names no validation operation, so the harness refuses
+them rather than running them through decapsulation, and they drive
+`MlKem`'s two predicates instead, one per section. Each group is half valid and
+half invalid, which makes it a published mixed-validity batch as well.
+
+### C2SP's CCTV vectors
+
+Two sets that answer different questions, and both publish what ACVP does not:
+the labelled values between `(d, z)` and `(ek, dk)`.
 
 **`intermediate/`** publishes `rho`, `sigma`, the matrix `A`, and the secret and
 error vectors as separate labelled values, which is what pins each sampler on its
 own. ACVP cannot: it publishes `(d, z) -> (ek, dk)` and nothing between, so it
 gates `SampleNTT` and `SamplePolyCBD` only as far as a whole key generation gates
-every step inside it — jointly, and only once key generation exists.
+every step inside it — jointly, and never by name.
 
 All three parameter sets are loaded rather than one, because `eta1` is 3 for
 ML-KEM-512 and 2 for the other two. A single file gates one of the two
@@ -132,16 +164,17 @@ while leaving `z` and `c` alone, and lands on the published value exactly.
 
 ### One line the CCTV vectors cannot gate
 
-Both sets predate the final standard in exactly one place: they expand
+Both CCTV sets predate the final standard in exactly one place: they expand
 `(ρ, σ) ← G(d)`, where FIPS 203 Algorithm 13 line 1 is `G(d ‖ k)`. The
 parameter-set byte binds a key to the `k` it was generated under, and it is the
-one thing about key generation no vector loaded here can see — every value the
-files publish begins at `ρ` and `σ`, and everything from there on matches the
-final standard, the `SampleNTT` index order included.
+one thing about key generation no CCTV value can see — every value those files
+publish begins at `ρ` and `σ`, and everything from there on matches the final
+standard, the `SampleNTT` index order included.
 
-So key generation is gated in two pieces rather than one: the lattice work
-against the vectors, entering below the expansion, and the expansion itself
-against `hashlib`, which is where SHA-3 is established for this repo anyway. The
-arrangement is worth knowing before reading either test, because the wrong repair
-is available and looks right — feeding the files' `d` to `key_gen` fails, and the
-standard-conforming code is what appears to be at fault.
+So the two corpora enter key generation at different points, and that is the
+division of labor between them: CCTV enters below the expansion, at
+`_key_pair`, and ACVP's `keyGen` set gates the expansion along with everything
+under it, from `d` to `ek` and `dk`. The arrangement is worth knowing before
+reading either test, because the wrong repair is available and looks right —
+feeding CCTV's `d` to `key_gen` fails, and the standard-conforming code is what
+appears to be at fault.

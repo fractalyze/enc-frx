@@ -167,9 +167,12 @@ Self-consistency is not evidence either. Seal-then-open round-trips forever
 inside a self-consistent wrong implementation. Property-based tests supplement
 the KATs; they never replace them.
 
-An exhaustive sweep — every parameter set against every published vector — is
-tagged `slow_kat`, which drops it from the per-PR run and keeps it in the
-scheduled one.
+An exhaustive pass — every parameter set against every published vector — is
+tagged `slow_kat` when it is too expensive to gate a merge, which drops it from
+the per-PR run and keeps it in the scheduled one. The tag is a cost decision
+rather than a description: a corpus small enough to run per PR runs per PR,
+because what the tag buys is review speed and what it costs is a suite that no
+longer blocks a merge.
 
 ### A vector is fetched, never transcribed
 

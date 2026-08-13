@@ -123,3 +123,33 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# NIST's ACVP sets: the only vectors here generated against the final standard,
+# and so the only ones that gate `(d, z) -> (ek, dk)` end to end.
+#
+# Every published case, not a subset, and untagged. The corpus is 240 cases and
+# the expensive half — the harness's tampering pass — is quadratic in a
+# decapsulation group of 10, which shards by parameter set into well under a
+# minute. A `slow_kat` tag here would mean the standards-exactness claim did not
+# gate a merge.
+py_test(
+    name = "acvp_test",
+    size = "medium",
+    srcs = ["acvp_test.py"],
+    data = [
+        "@acvp_ml_kem_encapdecap_expected//file",
+        "@acvp_ml_kem_encapdecap_prompt//file",
+        "@acvp_ml_kem_keygen_expected//file",
+        "@acvp_ml_kem_keygen_prompt//file",
+    ],
+    shard_count = 3,
+    deps = [
+        "//enc_frx/ml_kem",
+        "//enc_frx/ml_kem:encoding",
+        "//enc_frx/ml_kem:params",
+        "//enc_frx/testing:kat",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
