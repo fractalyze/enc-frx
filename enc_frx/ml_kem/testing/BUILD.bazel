@@ -1,5 +1,5 @@
 load("@enc_frx_pip//:requirements.bzl", "requirement")
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
 # FIPS 203's NTT algorithms in exact Python integers — the oracle the traced
@@ -150,6 +150,27 @@ py_test(
         "//enc_frx/testing:kat",
         "@rules_python//python/runfiles",
         requirement("absl_py"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# What a batch of decapsulations costs, and where inside one the time goes. Not
+# a test: a timing assertion is a flaky test, and the numbers belong on the issue
+# they were measured for.
+py_binary(
+    name = "kem_bench",
+    testonly = True,
+    srcs = ["kem_bench.py"],
+    deps = [
+        "//enc_frx/ml_kem",
+        "//enc_frx/ml_kem:_k_pke",
+        "//enc_frx/ml_kem:encoding",
+        "//enc_frx/ml_kem:hashes",
+        "//enc_frx/ml_kem:ntt",
+        "//enc_frx/ml_kem:params",
+        "//enc_frx/ml_kem:sampling",
+        requirement("absl_py"),
+        requirement("frx"),
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
