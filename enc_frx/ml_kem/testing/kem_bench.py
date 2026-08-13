@@ -6,9 +6,11 @@ batch of decapsulations is `B` independent runs of one program, which is the
 shape a device is wide for. That is a claim about throughput, and this is what
 holds it to a number.
 
-`decaps` is the direction worth measuring closely. It re-encrypts what it
-decrypted, so it costs about twice `encaps` (`ml_kem.py`) — both the hot path
-and the one with the most to gain.
+`decaps` is the direction worth measuring closely: it is the hot path, and it
+re-encrypts what it decrypted. That re-encryption costs less than it sounds —
+measured 1.04-1.53× `encaps`, falling toward 1.05× as `B` grows, because both
+directions are dominated by the same matrix expansion — so `encaps` is not a
+cheaper target to leave alone. It is the same target.
 
 ## What it reports, and what it will not
 
@@ -17,8 +19,11 @@ and the one with the most to gain.
   already paid for the shape it is about to run. A single conflated number hides
   which of the two a caller would actually pay.
 - **A dispatch floor**, measured as one trivial jitted call on the same device in
-  the same process. A small-`B` figure at or near the floor is a measurement of
-  the call and not of ML-KEM, and the ratio between two such rows says nothing.
+  the same process, **after a real program has run on it**. A small-`B` figure at
+  or near the floor is a measurement of the call and not of ML-KEM, and the ratio
+  between two such rows says nothing. The warm-up is load-bearing rather than
+  tidy: unwarmed, the same call reports eight times the number on GPU and the
+  floor stops being one.
 - **A per-stage breakdown**, so the bar chart says where the time is before
   anything is optimized. Each stage is compiled and timed on its own, which means
   **the stages do not sum to the whole**: each pays a dispatch it does not pay
@@ -56,7 +61,7 @@ from frx import Array
 
 from enc_frx.ml_kem import _k_pke, encoding, hashes, ntt, sampling
 from enc_frx.ml_kem.ml_kem import MlKem
-from enc_frx.ml_kem.params import PARAMETER_SETS, SEED_SIZE, MlKemParams
+from enc_frx.ml_kem.params import PARAMETER_SETS, SEED_SIZE, MlKemParams, N
 
 _BATCHES = flags.DEFINE_list(
     "batches", ["1", "32", "256", "1024", "8192"], "batch sizes to sweep"
@@ -74,6 +79,10 @@ _STAGE_BATCH = flags.DEFINE_integer(
 _REFERENCE_SECONDS = flags.DEFINE_integer(
     "reference_seconds", 1, "seconds per OpenSSL reference measurement; 0 skips it"
 )
+
+# Seconds of real work before the dispatch floor is timed — see `_dispatch_floor`
+# for why an unwarmed one is not a floor, and why one call does not do it.
+_FLOOR_WARMUP_S = 0.5
 
 
 @dataclasses.dataclass(frozen=True)
@@ -128,7 +137,34 @@ def _time(fn: Callable[..., Any], *args: Any) -> _Timing | None:
 
 
 def _dispatch_floor() -> _Timing | None:
-    """One trivial jitted call: what any measurement here cannot go below."""
+    """One trivial jitted call: what any measurement here cannot go below.
+
+    **The warm-up is the measurement.** Timed as the first thing in a process,
+    this call reports 0.185 ms on an RTX 5090; the identical call after a real
+    program has run reports 0.022 ms. Every stage row sits between those two, so
+    an unwarmed floor is not a floor — it is a threshold that rejects rows which
+    are genuinely above the real one, and the rows it rejects are exactly the
+    small-`B` ones it exists to judge.
+
+    **Sustained** work, and both words are load-bearing. A single call of the
+    program below leaves the floor at 0.180 ms — measured, not assumed — and so
+    do repeated trivial calls and an elementwise pass over the same shape. What
+    brings it to 0.022 ms is running a real program in a loop, which is why this
+    warms for a wall-clock budget rather than a call count.
+
+    The cause is not settled and nothing here claims one: the device's clocks
+    read 2.5-2.9 GHz while the high number is being taken, so an idle GPU does
+    not cover it. That uncertainty is the second reason to warm rather than to
+    subtract a constant — a constant would have to be right about the mechanism.
+
+    CPU shows none of this (0.005 ms either way), which is why the original
+    placement went unnoticed.
+    """
+    warm_up = frx.jit(ntt.ntt)
+    argument = ntt.as_field(fnp.asarray(np.zeros((256, 3, N), dtype=np.int32)))
+    start = time.perf_counter()
+    while time.perf_counter() - start < _FLOOR_WARMUP_S:
+        frx.block_until_ready(warm_up(argument))
     return _time(lambda x: x + np.int32(1), fnp.asarray(np.zeros(1, dtype=np.int32)))
 
 
