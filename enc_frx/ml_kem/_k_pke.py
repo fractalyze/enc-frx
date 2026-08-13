@@ -150,14 +150,25 @@ def encrypt(
     # `y` at eta1 on nonces 0..k-1, then `e_1` and `e_2` at eta2 on k..2k
     # (Algorithm 14 lines 9-20). The counter runs across the two widths rather
     # than restarting, which is the part a per-vector transcription gets wrong.
-    y_hat = ntt.ntt(
-        sampling.sample_poly_cbd(
+    if eta1 == eta2:
+        # Equal widths make it one draw over a contiguous nonce range, and each
+        # `prf` call is a separately unrolled sponge — so the second call is a
+        # second whole program, not a second pass. Merging across *unequal*
+        # widths would instead need `PRF_2(s,b) == PRF_3(s,b)[:128]`, which holds
+        # because SHAKE is an XOF but which FIPS 203 never states, so -512 keeps
+        # its two calls rather than resting on an unstated identity.
+        drawn = sampling.sample_poly_cbd(
+            hashes.prf(eta1, seed, np.arange(2 * k + 1, dtype=np.uint8)), eta1
+        )
+        y, errors = drawn[..., :k, :], drawn[..., k:, :]
+    else:
+        y = sampling.sample_poly_cbd(
             hashes.prf(eta1, seed, np.arange(k, dtype=np.uint8)), eta1
         )
-    )
-    errors = sampling.sample_poly_cbd(
-        hashes.prf(eta2, seed, np.arange(k, 2 * k + 1, dtype=np.uint8)), eta2
-    )
+        errors = sampling.sample_poly_cbd(
+            hashes.prf(eta2, seed, np.arange(k, 2 * k + 1, dtype=np.uint8)), eta2
+        )
+    y_hat = ntt.ntt(y)
     e_1, e_2 = errors[..., :k, :], errors[..., k, :]
 
     # `u ← NTT^-1(Â^T ∘ ŷ) + e_1`, Algorithm 14 line 21. `Â` is the matrix key

@@ -126,8 +126,11 @@ def _compact(candidates: Array) -> Array:
     lets the module docstring promise the same wrong array everywhere rather than
     whatever each backend does at the edge.
     """
-    rank = fnp.cumsum((candidates < np.int32(Q)).astype(np.int32), axis=-1)
-    slots = fnp.arange(N, dtype=np.int32)
+    # `int16` because `rank` counts acceptances among `CANDIDATES` of them and so
+    # cannot leave `[0, 560]`: the unrolled binary search below compares the whole
+    # rank row against every slot, and halving its width halves that traffic.
+    rank = fnp.cumsum((candidates < np.int32(Q)).astype(np.int16), axis=-1)
+    slots = fnp.arange(N, dtype=np.int16)
     picked = frx.vmap(
         lambda row: fnp.searchsorted(row, slots, side="right", method="scan_unrolled")
     )(rank)
