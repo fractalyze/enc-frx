@@ -26,32 +26,25 @@ from absl.testing import absltest, parameterized
 
 from enc_frx.ml_kem import _k_pke
 from enc_frx.ml_kem.ntt import as_ints
-from enc_frx.ml_kem.params import (
-    SEED_SIZE,
-    ciphertext_size,
-    decryption_key_size,
-    encapsulation_key_size,
-)
+from enc_frx.ml_kem.params import ML_KEM_768, PARAMETER_SETS, SEED_SIZE, MlKemParams
 from enc_frx.ml_kem.testing import cctv_vectors
 from enc_frx.testing.kat import to_bytes
 
-# (parameter set, k, eta1, eta2, du, dv) — FIPS 203 Table 2.
-_PARAMETER_SETS = (
-    ("ML-KEM-512", 2, 3, 2, 10, 4),
-    ("ML-KEM-768", 3, 2, 2, 10, 4),
-    ("ML-KEM-1024", 4, 2, 2, 11, 5),
-)
-
-# The same rows with the name repeated as the absl case label.
-_NAMED = tuple((row[0], *row) for row in _PARAMETER_SETS)
+_NAMED = tuple((params.name, params) for params in PARAMETER_SETS)
 
 # ML-KEM-768, for the tests that are about the assembly rather than about the
-# numbers, so they run once instead of three times. `decrypt` and `key_gen` take
-# subsets, and spelling those out per call site is what buries the argument that
-# matters under four that do not.
-_768 = dict(zip(("k", "eta1", "eta2", "du", "dv"), _PARAMETER_SETS[1][1:], strict=True))
-_768_KEY_GEN = {name: _768[name] for name in ("k", "eta1")}
-_768_DECRYPT = {name: _768[name] for name in ("k", "du", "dv")}
+# numbers, so they run once instead of three times. `_k_pke` takes the standard's
+# own parameter list per algorithm rather than a set, and spelling those out per
+# call site is what buries the argument that matters under four that do not.
+_768_ENCRYPT = {
+    "k": ML_KEM_768.k,
+    "eta1": ML_KEM_768.eta1,
+    "eta2": ML_KEM_768.eta2,
+    "du": ML_KEM_768.du,
+    "dv": ML_KEM_768.dv,
+}
+_768_KEY_GEN = {"k": ML_KEM_768.k, "eta1": ML_KEM_768.eta1}
+_768_DECRYPT = {"k": ML_KEM_768.k, "du": ML_KEM_768.du, "dv": ML_KEM_768.dv}
 
 
 def _zeros(size: int) -> np.ndarray:
@@ -75,11 +68,11 @@ def _encrypt_inputs(parameter_set: str) -> tuple[np.ndarray, np.ndarray, np.ndar
 class KeyGenTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_the_key_pair_matches_the_published_vectors(
-        self, parameter_set: str, k: int, eta1: int, _eta2: int, _du: int, _dv: int
+        self, params: MlKemParams
     ) -> None:
-        vectors = cctv_vectors.intermediate(parameter_set)
+        vectors = cctv_vectors.intermediate(params.name)
         ek, dk = _k_pke._key_pair(
-            vectors.array_at("ρ"), vectors.array_at("σ"), k=k, eta1=eta1
+            vectors.array_at("ρ"), vectors.array_at("σ"), k=params.k, eta1=params.eta1
         )
         # `ek_PKE` is `ByteEncode_12(t̂) ‖ ρ`, so this pins `t̂` exactly as well.
         self.assertEqual(to_bytes(ek), vectors.hex_at("ek"))
@@ -105,67 +98,75 @@ class KeyGenTest(parameterized.TestCase):
 class EncryptTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_the_ciphertext_matches_the_published_vector(
-        self, parameter_set: str, k: int, eta1: int, eta2: int, du: int, dv: int
+        self, params: MlKemParams
     ) -> None:
         got = _k_pke.encrypt(
-            *_encrypt_inputs(parameter_set),
-            k=k,
-            eta1=eta1,
-            eta2=eta2,
-            du=du,
-            dv=dv,
+            *_encrypt_inputs(params.name),
+            k=params.k,
+            eta1=params.eta1,
+            eta2=params.eta2,
+            du=params.du,
+            dv=params.dv,
         )
         self.assertEqual(
-            to_bytes(got), cctv_vectors.intermediate(parameter_set).hex_at("c")
+            to_bytes(got), cctv_vectors.intermediate(params.name).hex_at("c")
         )
 
     def test_the_same_randomness_gives_the_same_ciphertext(self) -> None:
         # The property decapsulation's re-encryption check rests on, and it
         # cannot fail today — which is the point. See `_k_pke`'s module docstring
         # for what an `encrypt` that drew its own randomness would break.
-        args = _encrypt_inputs("ML-KEM-768")
+        args = _encrypt_inputs(ML_KEM_768.name)
         self.assertEqual(
-            to_bytes(_k_pke.encrypt(*args, **_768)),
-            to_bytes(_k_pke.encrypt(*args, **_768)),
+            to_bytes(_k_pke.encrypt(*args, **_768_ENCRYPT)),
+            to_bytes(_k_pke.encrypt(*args, **_768_ENCRYPT)),
         )
 
     def test_different_randomness_gives_a_different_ciphertext(self) -> None:
         # And `r` is actually read: an `encrypt` that ignored it would be
         # deterministic too, and every round trip would still pass.
-        ek, m, _ = _encrypt_inputs("ML-KEM-768")
-        first = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE), **_768)
-        second = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE) + 1, **_768)
+        ek, m, _ = _encrypt_inputs(ML_KEM_768.name)
+        first = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE), **_768_ENCRYPT)
+        second = _k_pke.encrypt(ek, m, _zeros(SEED_SIZE) + 1, **_768_ENCRYPT)
         self.assertNotEqual(to_bytes(first), to_bytes(second))
 
     def test_the_traced_ciphertext_matches_the_eager_one(self) -> None:
-        args = _encrypt_inputs("ML-KEM-768")
-        traced = frx.jit(lambda ek, m, r: _k_pke.encrypt(ek, m, r, **_768))
+        args = _encrypt_inputs(ML_KEM_768.name)
+        traced = frx.jit(lambda ek, m, r: _k_pke.encrypt(ek, m, r, **_768_ENCRYPT))
         self.assertEqual(
-            to_bytes(traced(*args)), to_bytes(_k_pke.encrypt(*args, **_768))
+            to_bytes(traced(*args)), to_bytes(_k_pke.encrypt(*args, **_768_ENCRYPT))
         )
 
 
 class DecryptTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_the_message_matches_the_published_vector(
-        self, parameter_set: str, k: int, _eta1: int, _eta2: int, du: int, dv: int
+        self, params: MlKemParams
     ) -> None:
-        vectors = cctv_vectors.intermediate(parameter_set)
+        vectors = cctv_vectors.intermediate(params.name)
         got = _k_pke.decrypt(
-            vectors.array_at("dkPKE", 0), vectors.array_at("c"), k=k, du=du, dv=dv
+            vectors.array_at("dkPKE", 0),
+            vectors.array_at("c"),
+            k=params.k,
+            du=params.du,
+            dv=params.dv,
         )
         self.assertEqual(to_bytes(got), vectors.hex_at("m"))
 
     @parameterized.named_parameters(*_NAMED)
     def test_the_noisy_message_matches_before_the_rounding(
-        self, parameter_set: str, k: int, _eta1: int, _eta2: int, du: int, dv: int
+        self, params: MlKemParams
     ) -> None:
         # `Compress_1` hides its own input, so `w` is compared before it runs —
         # see `_noisy_message` for the sign error the rounding would forgive on
         # every ciphertext ever generated.
-        vectors = cctv_vectors.intermediate(parameter_set)
+        vectors = cctv_vectors.intermediate(params.name)
         got = _k_pke._noisy_message(
-            vectors.array_at("dkPKE", 0), vectors.array_at("c"), k=k, du=du, dv=dv
+            vectors.array_at("dkPKE", 0),
+            vectors.array_at("c"),
+            k=params.k,
+            du=params.du,
+            dv=params.dv,
         )
         np.testing.assert_array_equal(
             np.asarray(as_ints(got)),
@@ -178,9 +179,16 @@ class RoundTripTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*_NAMED)
     def test_decrypt_recovers_the_message_across_the_batch(
-        self, parameter_set: str, k: int, eta1: int, eta2: int, du: int, dv: int
+        self, params: MlKemParams
     ) -> None:
-        rng = np.random.default_rng(len(parameter_set))
+        k, eta1, eta2, du, dv = (
+            params.k,
+            params.eta1,
+            params.eta2,
+            params.du,
+            params.dv,
+        )
+        rng = np.random.default_rng(len(params.name))
         batch = 4
         ek, dk = _k_pke.key_gen(
             rng.integers(0, 256, (batch, SEED_SIZE), np.uint8), k=k, eta1=eta1
@@ -206,9 +214,9 @@ class RoundTripTest(parameterized.TestCase):
         )
         m = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
         r = rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8)
-        got = np.asarray(_k_pke.encrypt(ek, m, r, **_768))
+        got = np.asarray(_k_pke.encrypt(ek, m, r, **_768_ENCRYPT))
         for row in range(batch):
-            solo = _k_pke.encrypt(np.asarray(ek)[row], m[row], r[row], **_768)
+            solo = _k_pke.encrypt(np.asarray(ek)[row], m[row], r[row], **_768_ENCRYPT)
             np.testing.assert_array_equal(got[row], np.asarray(solo))
 
 
@@ -221,26 +229,35 @@ class LengthCheckTest(absltest.TestCase):
     input to route through a rejection path.
     """
 
-    _EK = encapsulation_key_size(_768["k"])
-    _DK = decryption_key_size(_768["k"])
-    _C = ciphertext_size(_768["k"], _768["du"], _768["dv"])
+    _EK = ML_KEM_768.encapsulation_key_size
+    _DK = ML_KEM_768.decryption_key_size
+    _C = ML_KEM_768.ciphertext_size
 
     def test_rejects_a_short_encapsulation_key(self) -> None:
         with self.assertRaises(ValueError):
             _k_pke.encrypt(
-                _zeros(self._EK - 1), _zeros(SEED_SIZE), _zeros(SEED_SIZE), **_768
+                _zeros(self._EK - 1),
+                _zeros(SEED_SIZE),
+                _zeros(SEED_SIZE),
+                **_768_ENCRYPT,
             )
 
     def test_rejects_a_message_that_is_not_32_bytes(self) -> None:
         with self.assertRaises(ValueError):
             _k_pke.encrypt(
-                _zeros(self._EK), _zeros(SEED_SIZE + 1), _zeros(SEED_SIZE), **_768
+                _zeros(self._EK),
+                _zeros(SEED_SIZE + 1),
+                _zeros(SEED_SIZE),
+                **_768_ENCRYPT,
             )
 
     def test_rejects_randomness_that_is_not_32_bytes(self) -> None:
         with self.assertRaises(ValueError):
             _k_pke.encrypt(
-                _zeros(self._EK), _zeros(SEED_SIZE), _zeros(SEED_SIZE - 1), **_768
+                _zeros(self._EK),
+                _zeros(SEED_SIZE),
+                _zeros(SEED_SIZE - 1),
+                **_768_ENCRYPT,
             )
 
     def test_rejects_a_short_key_generation_seed(self) -> None:

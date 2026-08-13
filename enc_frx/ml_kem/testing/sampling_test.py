@@ -29,21 +29,13 @@ from absl.testing import absltest, parameterized
 
 from enc_frx.ml_kem import hashes, sampling
 from enc_frx.ml_kem.ntt import as_ints
-from enc_frx.ml_kem.params import N
+from enc_frx.ml_kem.params import ML_KEM_512, PARAMETER_SETS, MlKemParams, N
 from enc_frx.ml_kem.testing import cctv_vectors
 from enc_frx.ml_kem.testing import fips203_reference as ref
 
-# (parameter set, k, eta1, eta2) — FIPS 203 Table 2.
-_PARAMETER_SETS = (
-    ("ML-KEM-512", 2, 3, 2),
-    ("ML-KEM-768", 3, 2, 2),
-    ("ML-KEM-1024", 4, 2, 2),
-)
-
-# The same rows with the name repeated as the absl case label, hoisted because
-# four `named_parameters` decorators would otherwise carry hand-kept copies of
-# one projection.
-_NAMED = tuple((row[0], *row) for row in _PARAMETER_SETS)
+# The named sets under the name each carries, hoisted because three
+# `named_parameters` decorators would otherwise carry copies of one projection.
+_NAMED = tuple((params.name, params) for params in PARAMETER_SETS)
 
 
 def _xof_seeds(seeds: tuple[bytes, ...]) -> np.ndarray:
@@ -74,9 +66,10 @@ def _sample_ntt_lowering() -> str:
 class SampleNttTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_matrix_matches_the_published_intermediate_value(
-        self, parameter_set: str, k: int, _eta1: int, _eta2: int
+        self, params: MlKemParams
     ) -> None:
-        vectors = cctv_vectors.intermediate(parameter_set)
+        k = params.k
+        vectors = cctv_vectors.intermediate(params.name)
         want = cctv_vectors.decode_polys(vectors.hex_at("A"), k * k).reshape(k, k, N)
 
         got = as_ints(sampling.expand_matrix(vectors.array_at("ρ"), k))
@@ -84,14 +77,14 @@ class SampleNttTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*_NAMED)
     def test_the_first_entry_matches_the_published_coefficients(
-        self, parameter_set: str, k: int, _eta1: int, _eta2: int
+        self, params: MlKemParams
     ) -> None:
         # `A[0, 0]` is published as decimals as well as inside the packed `A`, so
         # this is the one check that does not route through `byte_decode` — a
         # decoder bug cannot make both pass.
-        vectors = cctv_vectors.intermediate(parameter_set)
+        vectors = cctv_vectors.intermediate(params.name)
         rho = vectors.array_at("ρ")
-        got = as_ints(sampling.expand_matrix(rho, k))
+        got = as_ints(sampling.expand_matrix(rho, params.k))
         np.testing.assert_array_equal(
             np.asarray(got)[0, 0], np.array(vectors.ints_at("A[0, 0]"))
         )
@@ -101,9 +94,9 @@ class SampleNttTest(parameterized.TestCase):
         # self-consistent scheme, so only a published vector separates them —
         # this asserts the matrix is not symmetric, which is what makes the
         # vector check above able to tell.
-        vectors = cctv_vectors.intermediate("ML-KEM-512")
+        vectors = cctv_vectors.intermediate(ML_KEM_512.name)
         rho = vectors.array_at("ρ")
-        got = np.asarray(as_ints(sampling.expand_matrix(rho, 2)))
+        got = np.asarray(as_ints(sampling.expand_matrix(rho, ML_KEM_512.k)))
         self.assertFalse(np.array_equal(got[0, 1], got[1, 0]))
 
     def test_matches_the_oracle_on_random_seeds(self) -> None:
@@ -134,9 +127,11 @@ class SampleNttTest(parameterized.TestCase):
 class UnluckySeedTest(parameterized.TestCase):
     """The vectors that see an undersized XOF budget, and nothing else does."""
 
-    @parameterized.named_parameters(*((r[0], r[0]) for r in _PARAMETER_SETS))
-    def test_the_worst_known_rejection_runs_still_fit(self, parameter_set: str) -> None:
-        seeds = cctv_vectors.unlucky_seeds(parameter_set)
+    @parameterized.named_parameters(*_NAMED)
+    def test_the_worst_known_rejection_runs_still_fit(
+        self, params: MlKemParams
+    ) -> None:
+        seeds = cctv_vectors.unlucky_seeds(params.name)
         self.assertNotEmpty(seeds)
         got = np.asarray(as_ints(sampling.sample_ntt(_xof_seeds(seeds))))
         for row, seed in enumerate(seeds):
@@ -151,7 +146,7 @@ class UnluckySeedTest(parameterized.TestCase):
         # Driven through `sampling._candidates` rather than a hand-copied bit
         # split: this test measures the margin, and independence from the
         # production reading is already `fips203_reference`'s job above.
-        seeds = cctv_vectors.unlucky_seeds("ML-KEM-512")
+        seeds = cctv_vectors.unlucky_seeds(ML_KEM_512.name)
         stream = hashes.xof(sampling.XOF_BYTES, _xof_seeds(seeds))
         candidates = np.asarray(sampling._candidates(stream))
         accepted = np.cumsum(candidates < ref.Q, axis=-1)
@@ -198,12 +193,11 @@ class BudgetMissTest(absltest.TestCase):
 
 class SamplePolyCbdTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
-    def test_key_generation_vectors_match(
-        self, parameter_set: str, k: int, eta1: int, _eta2: int
-    ) -> None:
+    def test_key_generation_vectors_match(self, params: MlKemParams) -> None:
         # Algorithm 13: `s` takes nonces 0..k-1 and `e` takes k..2k-1, both at
         # eta1, both from sigma.
-        vectors = cctv_vectors.intermediate(parameter_set)
+        k, eta1 = params.k, params.eta1
+        vectors = cctv_vectors.intermediate(params.name)
         sigma = vectors.array_at("σ")
         nonces = np.arange(2 * k, dtype=np.uint8)
         got = np.asarray(
@@ -217,14 +211,13 @@ class SamplePolyCbdTest(parameterized.TestCase):
         )
 
     @parameterized.named_parameters(*_NAMED)
-    def test_encryption_vectors_match_at_both_etas(
-        self, parameter_set: str, k: int, eta1: int, eta2: int
-    ) -> None:
+    def test_encryption_vectors_match_at_both_etas(self, params: MlKemParams) -> None:
         # Algorithm 14: `r` takes nonces 0..k-1 at eta1, then `e1` takes k..2k-1
         # and `e2` takes 2k, both at eta2. The two widths and the nonce that
         # continues across them are the part a per-vector transcription gets
         # wrong.
-        vectors = cctv_vectors.intermediate(parameter_set)
+        k, eta1, eta2 = params.k, params.eta1, params.eta2
+        vectors = cctv_vectors.intermediate(params.name)
         seed = vectors.array_at("r", 0)
 
         r = sampling.sample_poly_cbd(

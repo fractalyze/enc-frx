@@ -16,6 +16,45 @@ What this implementation chooses is the shape: where the batch axis is, which
 loops are unrolled, and — the one choice with a security argument attached —
 **how much XOF output `SampleNTT` squeezes**.
 
+### The three parameter sets
+
+§8 approves three, and [`params.py`](../../enc_frx/ml_kem/params.py) names them
+as `ML_KEM_512`, `ML_KEM_768` and `ML_KEM_1024`. A consumer names one at
+construction — `MlKem(ML_KEM_768)` — and no call site names it again.
+
+| | k | η₁ | η₂ | d_u | d_v | category | RBG strength |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ML-KEM-512 | 2 | **3** | 2 | 10 | 4 | 1 | 128 |
+| ML-KEM-768 | 3 | 2 | 2 | 10 | 4 | 3 | 192 |
+| ML-KEM-1024 | 4 | 2 | 2 | **11** | **5** | 5 | 256 |
+
+The bold entries are why all three are gated rather than one. `η₁ = 3` at
+ML-KEM-512 is the second centered-binomial width, and `d_u`/`d_v` at ML-KEM-1024
+are the second compression width, so two of the three exercise a code path the
+default set never reaches — not merely a different array width. A suite run at
+ML-KEM-768 alone passes with either of those paths broken.
+
+| | encapsulation key | decapsulation key | ciphertext | decapsulation failure |
+| --- | --- | --- | --- | --- |
+| ML-KEM-512 | 800 | 1632 | 768 | 2⁻¹³⁸·⁸ |
+| ML-KEM-768 | 1184 | 2400 | 1088 | 2⁻¹⁶⁴·⁸ |
+| ML-KEM-1024 | 1568 | 3168 | 1568 | 2⁻¹⁷⁴·⁸ |
+
+Sizes are Table 3's, in bytes, and the shared secret is 32 at every set. The
+failure rates are Table 1's (§3.2): the probability that an *honest* exchange
+disagrees, which is not a rejection and produces no signal that it happened. They
+are far below anything reachable, and they are here because the number a reader
+would otherwise assume is zero.
+
+`MlKemParams` derives the size columns from `k`, `d_u` and `d_v` rather than
+transcribing them; the published literals live in
+[`ml_kem_test.py`](../../enc_frx/ml_kem/testing/ml_kem_test.py), so a wrong
+formula and a wrong transcription have to agree before either passes.
+
+§8 recommends ML-KEM-768 as the default. This repo has no default: the seam
+takes a set, because a scheme that picked one for the caller is a security
+decision made where nobody reviews it.
+
 ### The fixed XOF block
 
 `SampleNTT` is rejection sampling, so the bytes it consumes depend on their own
@@ -80,9 +119,13 @@ makes no constant-time claim, and the items below are named rather than fixed.
 - **Decapsulation takes adversary-chosen input against a long-lived key.** That
   is the inverse of a signature verifier's posture and the reason the rejection
   path is a select over a full-width comparison rather than a branch.
-- **The caller owes randomness.** `encaps` takes it as an argument; nothing here
-  samples it. The derandomized entry point the known-answer tests need lives
-  below the seam.
+- **The caller owes randomness, at a strength the parameter set fixes.** `encaps`
+  takes it as an argument; nothing here samples it. Table 2 states a required RBG
+  strength per set — 128, 192, 256 bits — and since the randomness crosses the
+  seam as bytes, nothing in this repo can see where they came from. A set chosen
+  for category 5 and seeded from a 128-bit generator is category 1, and every
+  vector still passes. The derandomized entry point the known-answer tests need
+  lives below the seam.
 - **The caller owes the encapsulation-key check.** FIPS 203 §7.2 places it at key
   import, and a seam whose keys are bytes on every call has no import step, so
   `encaps` checks the length and nothing else — a length is static and can raise,

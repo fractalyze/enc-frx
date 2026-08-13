@@ -46,7 +46,7 @@ from python.runfiles import runfiles
 
 from enc_frx.ml_kem import encoding
 from enc_frx.ml_kem.ml_kem import MlKem
-from enc_frx.ml_kem.params import SEED_SIZE
+from enc_frx.ml_kem.params import ML_KEM_512, PARAMETER_SETS, SEED_SIZE, MlKemParams
 from enc_frx.testing.kat import (
     KatError,
     KemVector,
@@ -63,16 +63,6 @@ _SETS = (
     ("acvp_ml_kem_keygen_prompt", "acvp_ml_kem_keygen_expected"),
     ("acvp_ml_kem_encapdecap_prompt", "acvp_ml_kem_encapdecap_expected"),
 )
-
-# FIPS 203 Table 2, keyed by the name ACVP publishes. A case cannot carry these
-# and they are not recoverable from one: `ek`'s length gives `k`, and nothing
-# gives `eta1`, `du` or `dv`. Which named sets exist is a layer above `MlKem`, so
-# the mapping lives with the vectors that need it.
-_PARAMETERS = {
-    "ML-KEM-512": {"k": 2, "eta1": 3, "eta2": 2, "du": 10, "dv": 4},
-    "ML-KEM-768": {"k": 3, "eta1": 2, "eta2": 2, "du": 10, "dv": 4},
-    "ML-KEM-1024": {"k": 4, "eta1": 2, "eta2": 2, "du": 11, "dv": 5},
-}
 
 # The three functions the `Kem` seam names, in the order a scheme performs them.
 _SEAM_FUNCTIONS = ("keygen", "encapsulation", "decapsulation")
@@ -102,11 +92,14 @@ _KEY_CHECKS = {
     ),
 }
 
-_NAMED = tuple((name, name) for name in _PARAMETERS)
+# `MlKemParams.name` is ACVP's `parameterSet` verbatim, so the join between a
+# published case and the instance it was generated for is derived rather than
+# kept by hand — the file publishes the one column nothing here can compute.
+_NAMED = tuple((params.name, params) for params in PARAMETER_SETS)
 
 _NAMED_KEY_CHECKS = tuple(
-    (f"{parameter_set}_{function}", parameter_set, function)
-    for parameter_set in _PARAMETERS
+    (f"{params.name}_{function}", params, function)
+    for params in PARAMETER_SETS
     for function in _KEY_CHECKS
 )
 
@@ -129,26 +122,20 @@ def _vectors() -> tuple[KemVector, ...]:
     )
 
 
-def _group(parameter_set: str, function: str) -> list[KemVector]:
+def _group(params: MlKemParams, function: str) -> list[KemVector]:
     """One published group: one parameter set's cases for one function."""
     return [
         vector
         for vector in _vectors()
-        if vector.parameter_set == parameter_set and vector.function == function
+        if vector.parameter_set == params.name and vector.function == function
     ]
 
 
-def _seam(parameter_set: str) -> list[KemVector]:
+def _seam(params: MlKemParams) -> list[KemVector]:
     """One instance's keygen, encapsulation and decapsulation cases."""
     return [
-        vector
-        for function in _SEAM_FUNCTIONS
-        for vector in _group(parameter_set, function)
+        vector for function in _SEAM_FUNCTIONS for vector in _group(params, function)
     ]
-
-
-def _scheme(parameter_set: str) -> MlKem:
-    return MlKem(**_PARAMETERS[parameter_set])
 
 
 def _j(z: bytes, c: bytes) -> bytes:
@@ -163,7 +150,7 @@ def _stack(items: list[bytes]) -> np.ndarray:
 
 class AcvpTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
-    def test_every_published_case(self, parameter_set: str) -> None:
+    def test_every_published_case(self, params: MlKemParams) -> None:
         """Every check the standard requires, plus the tampering it does not.
 
         All three sets rather than one: `eta1` is 3 at ML-KEM-512 and 2 at the
@@ -171,9 +158,9 @@ class AcvpTest(parameterized.TestCase):
         would leave one centered-binomial width and the whole compression path
         ungated.
         """
-        vectors = _seam(parameter_set)
+        vectors = _seam(params)
         self.assertNotEmpty(vectors)
-        check_kem(_scheme(parameter_set), vectors)
+        check_kem(MlKem(params), vectors)
 
 
 class KeyCheckTest(parameterized.TestCase):
@@ -182,7 +169,7 @@ class KeyCheckTest(parameterized.TestCase):
 
     @parameterized.named_parameters(*_NAMED_KEY_CHECKS)
     def test_the_published_verdicts_are_reproduced_per_entry(
-        self, parameter_set: str, function: str
+        self, params: MlKemParams, function: str
     ) -> None:
         """One group, one batched call, one verdict per entry.
 
@@ -191,7 +178,7 @@ class KeyCheckTest(parameterized.TestCase):
         answered a constant, fails here rather than passing every all-valid and
         every all-invalid set ever written.
         """
-        vectors = _group(parameter_set, function)
+        vectors = _group(params, function)
         self.assertNotEmpty(vectors)
         published = [vector.valid for vector in vectors]
         # Both verdicts appear, or the comparison below proves nothing.
@@ -200,13 +187,13 @@ class KeyCheckTest(parameterized.TestCase):
 
         check = _KEY_CHECKS[function]
         keys = _stack([getattr(vector, check.field) for vector in vectors])
-        predicate = getattr(_scheme(parameter_set), check.predicate)
+        predicate = getattr(MlKem(params), check.predicate)
         got = np.asarray(predicate(keys)).tolist()
         self.assertEqual(got, published, [vector.case_id for vector in vectors])
 
     @parameterized.named_parameters(*_NAMED_KEY_CHECKS)
     def test_every_published_key_is_the_length_the_standard_fixes(
-        self, parameter_set: str, function: str
+        self, params: MlKemParams, function: str
     ) -> None:
         """No case is a type-check case, which is why the comparison above can
         run as one batched call.
@@ -218,8 +205,8 @@ class KeyCheckTest(parameterized.TestCase):
         belongs at the corpus rather than as a mystery failure inside a batch.
         """
         check = _KEY_CHECKS[function]
-        size = getattr(_scheme(parameter_set), check.size)
-        for vector in _group(parameter_set, function):
+        size = getattr(MlKem(params), check.size)
+        for vector in _group(params, function):
             self.assertLen(getattr(vector, check.field), size, vector.case_id)
 
     def test_the_harness_refuses_a_key_check_case(self) -> None:
@@ -227,18 +214,18 @@ class KeyCheckTest(parameterized.TestCase):
         # against the mixture a caller who forgot to filter would actually hold:
         # what the harness must not do is run these through decapsulation and
         # report a pass for a case nobody ran. Any one set says it.
-        parameter_set = "ML-KEM-512"
+        params = ML_KEM_512
         with self.assertRaisesRegex(KatError, "seam does not name"):
             check_kem(
-                _scheme(parameter_set),
-                _seam(parameter_set) + _group(parameter_set, "encapsulationKeyCheck"),
+                MlKem(params),
+                _seam(params) + _group(params, "encapsulationKeyCheck"),
             )
 
 
 class MalformedKeyTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_a_published_malformed_key_rejects_a_ciphertext_meant_for_it(
-        self, parameter_set: str
+        self, params: MlKemParams
     ) -> None:
         """The rejection path, driven by keys this repo did not corrupt.
 
@@ -259,11 +246,11 @@ class MalformedKeyTest(parameterized.TestCase):
         [`ml_kem_test.py`](ml_kem_test.py) isolates §7.3 against CCTV's published
         `KBar`.
         """
-        scheme = _scheme(parameter_set)
-        vectors = _group(parameter_set, "decapsulationKeyCheck")
+        scheme = MlKem(params)
+        vectors = _group(params, "decapsulationKeyCheck")
         keys = _stack([vector.decapsulation_key for vector in vectors])  # type: ignore[misc]
 
-        _, embedded, _, z = encoding.decode_dk(keys, _PARAMETERS[parameter_set]["k"])
+        _, embedded, _, z = encoding.decode_dk(keys, params.k)
         # Any fixed randomness: what is compared is the pair of answers the same
         # ciphertext draws from a valid and a malformed key, not the ciphertext.
         randomness = np.arange(len(vectors) * SEED_SIZE, dtype=np.uint8).reshape(
@@ -290,10 +277,10 @@ class CorpusTest(absltest.TestCase):
         suite reporting green over a subset is what the harness exists to
         prevent.
         """
-        driven = sum(len(_seam(name)) for name in _PARAMETERS)
+        driven = sum(len(_seam(params)) for params in PARAMETER_SETS)
         key_checked = sum(
-            len(_group(name, function))
-            for name in _PARAMETERS
+            len(_group(params, function))
+            for params in PARAMETER_SETS
             for function in _KEY_CHECKS
         )
         self.assertGreater(driven, 0)
