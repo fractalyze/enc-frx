@@ -125,11 +125,14 @@ and it would not generalize — a hybrid KEM has no `Â`.
   secret it reaches through `decaps`. A `precompute` that validated eagerly and
   raised would put back exactly the bit the FO transform withholds, at a new
   door.
-- **What it holds is public.** `Â`, `t̂`, `H(ek)` and `ρ`'s descendants are all
-  derived from material that travels in the clear. `ŝ` is deliberately *not*
-  parsed: `dk_PKE` is carried as the bytes the key already contained and decoded
-  per call, which keeps the parsed value's handling requirements identical to
-  the encapsulation key's.
+- **What it *derives* is public; the value as a whole is still secret.** `Â`,
+  `t̂` and `H(ek)` all descend from `ek`, which travels in the clear — that is
+  what makes hoisting them a performance question rather than a security one.
+  But the parsed value also carries `dk_PKE` and `z`, which are `dk`'s secret
+  halves, so it is handled as `dk` is. What the design avoids is a *parsed*
+  secret: `ŝ` is deliberately not decoded into the value, `dk_PKE` is carried as
+  the bytes the key already contained, and `z` is untouched, so nothing in it is
+  more exposed than the key the caller already holds.
 - **`H(ek)` is in it for the backend the matrix is not.** The expansion is the
   larger share of a CPU decapsulation and the flat hashes are the larger share
   of a GPU one, so hoisting only `Â` would be a CPU-only win. `H(ek)` is the one

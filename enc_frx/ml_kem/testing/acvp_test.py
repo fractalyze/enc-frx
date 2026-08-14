@@ -145,6 +145,47 @@ def _stack(items: list[bytes]) -> np.ndarray:
     return np.stack([np.frombuffer(item, dtype=np.uint8) for item in items])
 
 
+def _encapsulated_to_each_key(
+    scheme: MlKem, params: MlKemParams
+) -> tuple[list[KemVector], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The `decapsulationKeyCheck` group, each key encapsulated *to* itself.
+
+    Shared by the two tests that drive that group through decapsulation — the
+    seam's and the precomputed path's — so the expected-value formula below has
+    one home. Two copies of it would both keep passing on the valid half if one
+    went stale.
+
+    The construction is what those tests rest on: the ciphertext for key `i`
+    comes from the `ek` that key itself carries, so a valid and a malformed key
+    answer the *same* ciphertext differently. Handing every key a ciphertext
+    from elsewhere would fail re-encryption on its own, which a `decaps` that
+    rejected unconditionally would also produce.
+    """
+    vectors = _group(params, "decapsulationKeyCheck")
+    keys = _stack([vector.decapsulation_key for vector in vectors])  # type: ignore[misc]
+    _, embedded, _, z = encoding.decode_dk(keys, params.k)
+    # Any fixed randomness: what is compared is the pair of answers the same
+    # ciphertext draws from a valid and a malformed key, not the ciphertext.
+    randomness = np.arange(len(vectors) * SEED_SIZE, dtype=np.uint8).reshape(
+        len(vectors), SEED_SIZE
+    )
+    ciphertexts, secrets = scheme.encaps(embedded, randomness=randomness)
+    return vectors, keys, np.asarray(ciphertexts), np.asarray(secrets), np.asarray(z)
+
+
+def _want(
+    vector: KemVector,
+    index: int,
+    secrets: np.ndarray,
+    ciphertexts: np.ndarray,
+    z: np.ndarray,
+) -> bytes:
+    """What entry `index` must decapsulate to: the sender's secret, or `J(z ‖ c)`."""
+    if vector.valid:
+        return to_bytes(secrets[index])
+    return _j(bytes(z[index]), to_bytes(ciphertexts[index]))
+
+
 class AcvpTest(parameterized.TestCase):
     @parameterized.named_parameters(*_NAMED)
     def test_every_published_case(self, params: MlKemParams) -> None:
@@ -244,25 +285,16 @@ class MalformedKeyTest(parameterized.TestCase):
         `KBar`.
         """
         scheme = MlKem(params)
-        vectors = _group(params, "decapsulationKeyCheck")
-        keys = _stack([vector.decapsulation_key for vector in vectors])  # type: ignore[misc]
-
-        _, embedded, _, z = encoding.decode_dk(keys, params.k)
-        # Any fixed randomness: what is compared is the pair of answers the same
-        # ciphertext draws from a valid and a malformed key, not the ciphertext.
-        randomness = np.arange(len(vectors) * SEED_SIZE, dtype=np.uint8).reshape(
-            len(vectors), SEED_SIZE
+        vectors, keys, ciphertexts, secrets, z = _encapsulated_to_each_key(
+            scheme, params
         )
-        ciphertexts, secrets = scheme.encaps(embedded, randomness=randomness)
-
         got = np.asarray(scheme.decaps(keys, ciphertexts))
         for index, vector in enumerate(vectors):
-            want = (
-                to_bytes(secrets[index])
-                if vector.valid
-                else _j(bytes(np.asarray(z)[index]), to_bytes(ciphertexts[index]))
+            self.assertEqual(
+                bytes(got[index]),
+                _want(vector, index, secrets, ciphertexts, z),
+                vector.case_id,
             )
-            self.assertEqual(bytes(got[index]), want, vector.case_id)
 
 
 class PrecomputedPathTest(parameterized.TestCase):
@@ -291,10 +323,11 @@ class PrecomputedPathTest(parameterized.TestCase):
         for vector in vectors:
             assert vector.decapsulation_key is not None
             assert vector.ciphertext is not None
-            precomputed = scheme.precompute_decaps(
-                _stack([vector.decapsulation_key])[0]
+            key = _stack([vector.decapsulation_key])
+            ciphertext = _stack([vector.ciphertext])
+            got = scheme.decaps_precomputed(
+                scheme.precompute_decaps(key[0]), ciphertext
             )
-            got = scheme.decaps_precomputed(precomputed, _stack([vector.ciphertext]))
             self.assertEqual(
                 to_bytes(got[0]), vector.shared_secret, f"{vector.case_id} byte-exact"
             )
@@ -302,11 +335,7 @@ class PrecomputedPathTest(parameterized.TestCase):
             # not merely both be plausible, they must be the same function.
             np.testing.assert_array_equal(
                 np.asarray(got),
-                np.asarray(
-                    scheme.decaps(
-                        _stack([vector.decapsulation_key]), _stack([vector.ciphertext])
-                    )
-                ),
+                np.asarray(scheme.decaps(key, ciphertext)),
                 f"{vector.case_id}: the precomputed path diverged from the seam",
             )
 
@@ -323,39 +352,30 @@ class PrecomputedPathTest(parameterized.TestCase):
         rejection secret through it, not an exception, and the valid half has to
         still return the sender's own secret through the same call.
 
-        Same construction as `MalformedKeyTest`: every key is encapsulated *to*,
-        using the `ek` that key itself carries, so a valid and a malformed key
-        answer the *same* ciphertext differently. Handing every key a ciphertext
-        from elsewhere would fail re-encryption on its own and prove nothing.
+        The fixture is `MalformedKeyTest`'s, shared rather than copied — see
+        `_encapsulated_to_each_key` for what the construction rests on.
         """
         scheme = MlKem(params)
-        vectors = _group(params, "decapsulationKeyCheck")
+        vectors, keys, ciphertexts, secrets, z = _encapsulated_to_each_key(
+            scheme, params
+        )
         self.assertNotEmpty(vectors)
         published = [vector.valid for vector in vectors]
         self.assertIn(True, published)
         self.assertIn(False, published)
 
-        keys = _stack([vector.decapsulation_key for vector in vectors])  # type: ignore[misc]
-        _, embedded, _, z = encoding.decode_dk(keys, params.k)
-        randomness = np.arange(len(vectors) * SEED_SIZE, dtype=np.uint8).reshape(
-            len(vectors), SEED_SIZE
-        )
-        ciphertexts, secrets = scheme.encaps(embedded, randomness=randomness)
-
         for index, vector in enumerate(vectors):
             # No `assertRaises` guard: an exception here fails the test by
             # escaping, and naming it would suggest the alternative was ever on
             # the table.
-            precomputed = scheme.precompute_decaps(keys[index])
             got = scheme.decaps_precomputed(
-                precomputed, np.asarray(ciphertexts)[index : index + 1]
+                scheme.precompute_decaps(keys[index]), ciphertexts[index : index + 1]
             )
-            want = (
-                to_bytes(secrets[index])
-                if vector.valid
-                else _j(bytes(np.asarray(z)[index]), to_bytes(ciphertexts[index]))
+            self.assertEqual(
+                to_bytes(got[0]),
+                _want(vector, index, secrets, ciphertexts, z),
+                vector.case_id,
             )
-            self.assertEqual(to_bytes(got[0]), want, vector.case_id)
 
 
 class CorpusTest(absltest.TestCase):

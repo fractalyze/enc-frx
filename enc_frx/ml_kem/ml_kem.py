@@ -69,7 +69,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from enc_frx.kem import Kem
-from enc_frx.ml_kem import _k_pke, encoding, hashes, ntt, sampling
+from enc_frx.ml_kem import _k_pke, encoding, hashes
 from enc_frx.ml_kem.params import POLY_BYTES, SEED_SIZE, MlKemParams
 
 
@@ -90,11 +90,22 @@ class PrecomputedDecapsulationKey(NamedTuple):
     eagerly and raised would reintroduce the bit the transform exists to
     withhold, at a new door (`enc_frx/kem.py`).
 
-    **Every field is public.** `dk_pke` is carried as the bytes `decode_dk`
-    produced and is decoded to `ŝ` per call, so no secret vector is parsed or
-    held here beyond what the key's own encoding already is. That keeps this
-    value's handling requirements the same as the encapsulation key's, and it is
-    why `docs/reference/security.md` says nothing new about it.
+    **This is secret material, and handling it is handling `dk`.** `dk_pke` and
+    `z` are the decapsulation key's secret halves; what the design avoids is a
+    *parsed* secret, not a secret. Both are carried as exactly the bytes
+    `decode_dk` produced — `ŝ` is decoded per call and `z` is never touched — so
+    nothing here is more exposed than the key the caller already holds, and
+    `docs/reference/security.md` needs no new claim. It does not follow that the
+    value is safe to log or cache anywhere `dk` would not be.
+
+    The *derived* fields are public: `a_hat`, `t_hat` and `h_ek` all descend
+    from `ek`, which travels in the clear. That is what makes hoisting them a
+    performance question rather than a security one.
+
+    A NamedTuple rather than the registered frozen dataclass
+    `docs/reference/conventions.md` asks for: every field is a leaf, so this is
+    already a pytree and nothing rides aux. The registration exists for types
+    carrying static metadata, which this has none of.
 
     Unbatched by construction — see `MlKem.precompute_decaps`.
     """
@@ -262,10 +273,13 @@ class MlKem:
                 "of keys is `decaps`, which pairs key `i` with ciphertext `i`."
             )
         dk_pke, ek, _, z = encoding.decode_dk(dk, self._params.k)
-        t_hat_ints, rho = encoding.decode_ek(ek, self._params.k)
+        # The pair, from `_k_pke`, so K-PKE's own representation choices stay in
+        # the layer that makes them and the two halves cannot come from
+        # different keys.
+        t_hat, a_hat = _k_pke.expand_ek(ek, self._params.k)
         return PrecomputedDecapsulationKey(
-            a_hat=sampling.expand_matrix(rho, self._params.k),
-            t_hat=ntt.as_field(t_hat_ints),
+            a_hat=a_hat,
+            t_hat=t_hat,
             h_ek=hashes.h(ek),
             dk_pke=dk_pke,
             z=z,
@@ -301,21 +315,7 @@ class MlKem:
         )
 
         accepted = (
-            fnp.all(
-                _k_pke.encrypt_expanded(
-                    t_hat=precomputed.t_hat,
-                    a_hat=precomputed.a_hat,
-                    m=m,
-                    r=r,
-                    k=params.k,
-                    eta1=params.eta1,
-                    eta2=params.eta2,
-                    du=params.du,
-                    dv=params.dv,
-                )
-                == c,
-                axis=-1,
-            )
+            fnp.all(self._encrypt_expanded(precomputed, m, r) == c, axis=-1)
             & precomputed.key_ok
         )
         return fnp.where(accepted[..., None], shared, rejected)
@@ -369,6 +369,27 @@ class MlKem:
             ek,
             m,
             r,
+            k=params.k,
+            eta1=params.eta1,
+            eta2=params.eta2,
+            du=params.du,
+            dv=params.dv,
+        )
+
+    def _encrypt_expanded(
+        self, precomputed: PrecomputedDecapsulationKey, m: Array, r: Array
+    ) -> Array:
+        """`_encrypt` over a key that was already expanded, for the same reason.
+
+        The parameter list is mapped in one place per direction rather than at
+        each call site — see `_encrypt`, whose argument this is too.
+        """
+        params = self._params
+        return _k_pke.encrypt_expanded(
+            t_hat=precomputed.t_hat,
+            a_hat=precomputed.a_hat,
+            m=m,
+            r=r,
             k=params.k,
             eta1=params.eta1,
             eta2=params.eta2,
