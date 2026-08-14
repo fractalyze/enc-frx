@@ -76,6 +76,12 @@ _BUDGET = flags.DEFINE_float(
 _STAGE_BATCH = flags.DEFINE_integer(
     "stage_batch", 256, "batch size for the per-stage breakdown; 0 skips it"
 )
+_SWEEP = flags.DEFINE_bool(
+    "sweep", True, "the end-to-end encaps/decaps table by batch size"
+)
+_HOIST = flags.DEFINE_bool(
+    "hoist", True, "compare the seam against the precomputed path over one key"
+)
 _REFERENCE_SECONDS = flags.DEFINE_integer(
     "reference_seconds", 1, "seconds per OpenSSL reference measurement; 0 skips it"
 )
@@ -209,6 +215,92 @@ def _sweep(
             f"{encaps.warm_s * 1e3:>10.2f}ms  {decaps.compile_s:>13.2f}s  "
             f"{decaps.warm_s * 1e3:>10.2f}ms  {per_op * 1e6:>9.1f}us  "
             f"{1 / per_op:>10.0f}  {decaps.warm_s / encaps.warm_s:>5.2f}x"
+        )
+
+
+def _one_key(scheme: MlKem, rng: np.random.Generator) -> tuple[Array, Array]:
+    """`(ek, dk)` — the one long-lived key the rows below all decapsulate under.
+
+    Minted once per parameter set rather than per row: the workload `_hoist`
+    measures is a server holding a key across traffic, so a fresh key per batch
+    size would be a different story told with the same table.
+    """
+    seed = fnp.asarray(rng.integers(0, 256, scheme.seed_size, dtype=np.uint8))
+    return frx.block_until_ready(frx.jit(scheme.keygen)(seed))
+
+
+def _same_key_material(
+    scheme: MlKem, ek: Array, dk: Array, batch: int, rng: np.random.Generator
+) -> tuple[Array, Array]:
+    """`(dk tiled to [B], ciphertexts)` for one batch size under `(ek, dk)`.
+
+    The workload the hoist is for, and the one `_material` above does not build:
+    a server holding one long-lived key against traffic from many senders. The
+    tiled copy is what that server passes the seam today, and it is arm A below.
+    """
+    m = fnp.asarray(rng.integers(0, 256, (batch, SEED_SIZE), dtype=np.uint8))
+    c, _ = frx.block_until_ready(
+        frx.jit(scheme.encaps_internal)(
+            fnp.broadcast_to(ek, (batch, scheme.encapsulation_key_size)), m
+        )
+    )
+    return fnp.broadcast_to(dk, (batch, scheme.decapsulation_key_size)), c
+
+
+def _hoist(
+    params: MlKemParams, batches: Sequence[int], rng: np.random.Generator
+) -> None:
+    """The seam against the precomputed path, over one key.
+
+    **Both arms in one process**, which is not a stylistic choice here: the two
+    differ by a few percent at small `B`, and compile-cache and process state
+    move a cross-process comparison by more than that — in sign as well as in
+    size (`CLAUDE.md`).
+
+    **`precompute` is measured once, above the table, and that is the point.**
+    It takes the rank-1 key and never sees the batch axis, so it cannot vary
+    with `B` — a column of it would be one number printed as though it were a
+    series. It is a per-*key* cost, and it is reported beside the rows rather
+    than added into either arm: a server pays it when it loads its key, so
+    dividing it across one batch would describe a caller that reloads its key
+    per request, which is the workload this pair does not serve.
+
+    What it *does* determine is how many batches the pair takes to pay for
+    itself, which is a different number per row and is why it is printed at all.
+    """
+    scheme = MlKem(params)
+    ek, dk = _one_key(scheme, rng)
+    parse = _time(scheme.precompute_decaps, dk)
+    precomputed = frx.block_until_ready(frx.jit(scheme.precompute_decaps)(dk))
+
+    _say(f"\n{params.name} same-key batch: the seam against the precomputed path")
+    if parse is None:
+        _say("  (precompute_decaps unavailable on this device)")
+        return
+    _say(
+        f"  precompute_decaps, once per key: {parse.warm_s * 1e3:.2f}ms "
+        f"(compile {parse.compile_s:.2f}s)"
+    )
+    _say(
+        f"  {'B':>6}  {'decaps warm':>12}  {'precomputed':>12}  {'speedup':>8}  "
+        f"{'break-even':>11}  {'per op':>10}"
+    )
+    for batch in batches:
+        tiled, c = _same_key_material(scheme, ek, dk, batch, rng)
+        seam = _time(scheme.decaps, tiled, c)
+        hoisted = _time(scheme.decaps_precomputed, precomputed, c)
+        if seam is None or hoisted is None:
+            _say(f"  {batch:>6}  {'(unavailable at this batch size)':>60}")
+            continue
+        # Batches of this size before the one-time parse is repaid. Above 1, a
+        # caller that decapsulates a single batch per key is behind.
+        break_even = parse.warm_s / (seam.warm_s - hoisted.warm_s)
+        _say(
+            f"  {batch:>6}  {seam.warm_s * 1e3:>10.2f}ms  "
+            f"{hoisted.warm_s * 1e3:>10.2f}ms  "
+            f"{seam.warm_s / hoisted.warm_s:>7.2f}x  "
+            f"{break_even:>11.2f}  "
+            f"{hoisted.per_op(batch) * 1e6:>8.1f}us"
         )
 
 
@@ -381,8 +473,12 @@ def main(argv: list[str]) -> None:
             f"{floor.warm_s * 1e3:.3f}ms warm — nothing below this is ML-KEM"
         )
 
-    for params in chosen:
-        _sweep(params, batches, rng)
+    if _SWEEP.value:
+        for params in chosen:
+            _sweep(params, batches, rng)
+    if _HOIST.value:
+        for params in chosen:
+            _hoist(params, batches, rng)
     if _STAGE_BATCH.value:
         for params in chosen:
             _breakdown(params, _STAGE_BATCH.value, rng)

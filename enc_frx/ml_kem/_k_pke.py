@@ -37,13 +37,22 @@ and that a consumer taking it on has been told.
 Everything is leading-axis, so a batch of `B` is one traced computation. See
 `_matrix_vector` for the shape argument that makes the products `k`-independent.
 
-## Two internals with their own entry points
+## The algorithms' own step boundaries have their own entry points
 
-`_key_pair` and `_noisy_message` are the algorithms' own step boundaries —
-Algorithm 13 line 1 against the rest, and Algorithm 15 line 5 against line 6.
-The published intermediate values land on those boundaries because that is where
-the standard names its quantities, which is also why the tests enter there. Each
-docstring says what its boundary is worth; neither exists only for a test.
+`_key_pair`, `_noisy_message` and the `expand_ek` / `encrypt_expanded` pair each
+split one algorithm where the standard does — Algorithm 13 line 1 against the
+rest, Algorithm 15 line 5 against line 6, and Algorithm 14 lines 2-8 against
+line 9. The published intermediate values land on those boundaries because that
+is where the standard names its quantities. Each docstring says what its
+boundary is worth; none exists only for a test.
+
+The first two are private, and the tests enter there. Algorithm 14's split is
+public on **both** sides because what crosses it is not a test: everything above
+line 9 is a function of the encapsulation key alone, so a decapsulator holding
+one long-lived key crosses it once for a whole batch instead of once per
+ciphertext (`MlKem.precompute_decaps`). Publishing only the lower half would
+leave the upper half open-coded a layer up, which is how the pairing `encrypt`
+guarantees becomes something a caller has to remember.
 
 ## The parameters arrive per call
 
@@ -139,13 +148,65 @@ def encrypt(
     A function of its arguments and nothing else — see the module docstring for
     what silently breaks if that ever stops being true.
     """
+    t_hat, a_hat = expand_ek(ek_pke, k)
+    return encrypt_expanded(
+        t_hat=t_hat, a_hat=a_hat, m=m, r=r, k=k, eta1=eta1, eta2=eta2, du=du, dv=dv
+    )
+
+
+def expand_ek(ek_pke: ArrayLike, k: int) -> tuple[Array, Array]:
+    """Algorithm 14 lines 2-8: `[..., ek] -> (t̂, Â)`, the key half.
+
+    The complement of `encrypt_expanded` below, and public for the same reason:
+    everything here is a function of `ek_PKE` alone, so a decapsulator holding
+    one long-lived key runs it once rather than once per ciphertext
+    (`MlKem.precompute_decaps`).
+
+    Named rather than open-coded at each call site because the two outputs are a
+    *pair* — `encrypt_expanded` is a function of one `ek_PKE`, and halves from
+    different keys produce a ciphertext under no key anyone holds. Deriving both
+    here is what makes that structural instead of a caller's obligation. It also
+    keeps K-PKE's internal representation choices — that `t̂` crosses as field
+    elements, that `Â`'s index order is the sampler's and the transpose belongs
+    to the product — inside this module, where `encrypt` already states them.
+    """
     t_hat_ints, rho = encoding.decode_ek(ek_pke, k)
-    t_hat = ntt.as_field(t_hat_ints)
+    return ntt.as_field(t_hat_ints), sampling.expand_matrix(rho, k)
+
+
+def encrypt_expanded(
+    t_hat: Array,
+    a_hat: Array,
+    m: ArrayLike,
+    r: ArrayLike,
+    *,
+    k: int,
+    eta1: int,
+    eta2: int,
+    du: int,
+    dv: int,
+) -> Array:
+    """Algorithm 14 from line 9 onward, over an already-expanded key.
+
+    Its own entry point for the same reason `_key_pair` is one: lines 2-8 are
+    decoding `ek_PKE` and expanding `Â` from the `ρ` inside it, and the standard
+    puts a step boundary there. What is new is that a decapsulator can cross it
+    *once* for a key it will use many times — `Â` is `k^2` independent
+    `SampleNTT` runs and the largest Keccak stage of a CPU decapsulation, and
+    nothing downstream of here depends on the key at all
+    (`MlKem.precompute_decaps`).
+
+    **`t_hat` and `a_hat` must come from one `ek_PKE`** — take them from
+    `expand_ek`, which is why it returns the pair rather than either half.
+    Mismatched halves produce a ciphertext under no key anyone holds, which
+    fails the re-encryption comparison in `decaps` for every input, so a
+    decapsulator that got this wrong rejects everything rather than accepting
+    anything, and every round trip through it still agrees with itself.
+    """
     message = encoding.checked_length(m, SEED_SIZE, "a K-PKE message")
     seed = encoding.checked_length(r, SEED_SIZE, "K-PKE encryption randomness")[
         ..., None, :
     ]
-    a_hat = sampling.expand_matrix(rho, k)
 
     # `y` at eta1 on nonces 0..k-1, then `e_1` and `e_2` at eta2 on k..2k
     # (Algorithm 14 lines 9-20). The counter runs across the two widths rather

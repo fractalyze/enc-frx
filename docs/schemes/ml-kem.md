@@ -98,6 +98,46 @@ Everything is batch-first over leading axes; there is no scalar entry point.
 - **Sequential within a message:** nothing. ML-KEM has no Horner chain, which is
   what separates it from Poly1305 and GHASH.
 
+## One key, many ciphertexts
+
+The seam's `decaps` takes one key *per* batch entry, which is the general shape
+and the only one a `Kem` consumer can express. A server decapsulating under one
+long-lived key is a narrower case, and it is worth naming because `Â` is a
+function of `ρ` alone: at `B` ciphertexts the general path expands `[B, k, k,
+256]` of a matrix whose rows are all equal. Nothing dedupes that, and nothing
+can — `ρ` is traced data rather than shape, so a batch whose keys happen to be
+equal is indistinguishable at trace time from one whose keys are not.
+
+`MlKem.precompute_decaps` / `MlKem.decaps_precomputed` are that narrower
+operation, below the seam on `MlKem` alone. The `Kem` protocol does not gain a
+method: a protocol returning a scheme-shaped opaque value would make generic
+code hold ML-KEM-shaped state, which is the coupling the seam exists to prevent,
+and it would not generalize — a hybrid KEM has no `Â`.
+
+- **It is narrower, not faster.** Passing per-entry keys to it would be a
+  different operation, so `precompute_decaps` takes a rank-1 key and raises on a
+  leading axis rather than broadcasting. The restriction is a shape error, not a
+  docstring.
+- **The parsed value carries the key checks.** §7.2 and §7.3 are functions of
+  the key, so a key parsed once is checked once — but `precompute_decaps` still
+  raises nothing on a malformed key. The verdict rides the parsed value and is
+  AND-ed into every later acceptance, so a bad key reaches the same rejection
+  secret it reaches through `decaps`. A `precompute` that validated eagerly and
+  raised would put back exactly the bit the FO transform withholds, at a new
+  door.
+- **What it *derives* is public; the value as a whole is still secret.** `Â`,
+  `t̂` and `H(ek)` all descend from `ek`, which travels in the clear — that is
+  what makes hoisting them a performance question rather than a security one.
+  But the parsed value also carries `dk_PKE` and `z`, which are `dk`'s secret
+  halves, so it is handled as `dk` is. What the design avoids is a *parsed*
+  secret: `ŝ` is deliberately not decoded into the value, `dk_PKE` is carried as
+  the bytes the key already contained, and `z` is untouched, so nothing in it is
+  more exposed than the key the caller already holds.
+- **`H(ek)` is in it for the backend the matrix is not.** The expansion is the
+  larger share of a CPU decapsulation and the flat hashes are the larger share
+  of a GPU one, so hoisting only `Â` would be a CPU-only win. `H(ek)` is the one
+  member of the `H`/`J`/`G` group that does not need the ciphertext.
+
 ## What leaks, and what the caller owes
 
 Read [`../reference/security.md`](../reference/security.md) first; this repo
