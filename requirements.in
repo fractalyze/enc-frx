@@ -12,6 +12,16 @@
 # together: hash-frx resolves frx from its own lock, so skew puts two different
 # frx copies on one test's sys.path.
 #
+# Which frx build that is, is hash-frx's `frx>=` floor to choose, and it is not
+# read off a feature landing. On GPU — and only there, the arms being GPU-only —
+# Keccak lowers through hash-frx's dedicated emitters, and a wheel that merely
+# *carries* an emitter is not a wheel where it is correct: the first one to carry
+# these miscompiled the fused permutation. The two failure modes sit on either
+# side of the floor and neither is visible from here — below it the marker is
+# emitted but not recognized, which gives right bytes and no kernels on any
+# backend, and on the wheel where the emitter first appeared it gives wrong ones
+# on the only backend that runs it. Follow the floor, not the changelog.
+#
 # zk_dtypes arrives via frx but is pinned here directly, because this repo has a
 # floor of its own on it. AES and GCM are defined over binary fields this stack
 # carries natively — `binary_field_gf8_aes` (GF(2^8), AES's reduction polynomial)
