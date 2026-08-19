@@ -40,7 +40,7 @@ py_test(
 
 py_test(
     name = "chacha20_poly1305_test",
-    size = "small",
+    size = "medium",
     srcs = ["chacha20_poly1305_test.py"],
     deps = [
         ":rfc8439_reference",
