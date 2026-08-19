@@ -133,10 +133,11 @@ and it would not generalize — a hybrid KEM has no `Â`.
   secret: `ŝ` is deliberately not decoded into the value, `dk_PKE` is carried as
   the bytes the key already contained, and `z` is untouched, so nothing in it is
   more exposed than the key the caller already holds.
-- **`H(ek)` is in it for the backend the matrix is not.** The expansion is the
-  larger share of a CPU decapsulation and the flat hashes are the larger share
-  of a GPU one, so hoisting only `Â` would be a CPU-only win. `H(ek)` is the one
-  member of the `H`/`J`/`G` group that does not need the ciphertext.
+- **`H(ek)` is in it because it is the only flat hash that can be.** `H`, `J` and
+  `G` are each a single sponge over the whole batch and none is the expansion's
+  size, but `H(ek)` is the one member of the group that does not need the
+  ciphertext — so it is the one a per-key precompute can hoist at all. Hoisting
+  it costs a hash the value already holds the input for.
 
 ## What leaks, and what the caller owes
 
