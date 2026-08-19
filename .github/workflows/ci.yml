@@ -12,8 +12,6 @@ on:
   # Puts back the `slow_kat` suites .bazelrc.ci drops per PR.
   schedule:
     - cron: "0 17 * * *"
-  # A rerun replays the matrix `setup` already produced, so a HAS_GPU_RUNNER
-  # change needs a fresh run.
   workflow_dispatch:
 
 # Cancel in-progress runs for PRs (same head branch), but never cancel pushes
@@ -22,62 +20,60 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Runners are labelled by capability, not role: a CPU box is `[self-hosted, cpu]`,
-# a GPU box `[self-hosted, gpu]`.
-#
-# No GPU runner serves this repo yet, so the GPU leg is gated on HAS_GPU_RUNNER
-# and stays absent — a static entry would queue on every PR, which reads as
-# "still running" rather than "not configured". A gated leg cannot be a required
-# check; make the matrix static when access lands. (A job-level `if` can't read
-# `matrix`, hence the setup job.)
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
-      tag_filters: ${{ steps.set.outputs.tag_filters }}
-    steps:
-      - id: set
-        run: |
-          # One `flags` bag per leg keeps the test step branch-free. The pool is
-          # CPU-only, so the GPU leg runs local with no remote flags; strict
-          # `cuda` (no cpu fallback) proves a green leg ran on the device, and
-          # prealloc is off because bazel runs test actions concurrently against
-          # the one device.
-          rbe='--config=remote --tls_certificate=/etc/rbe-certs/ca.pem --tls_client_certificate=/etc/rbe-certs/client.pem --tls_client_key=/etc/rbe-certs/client.key'
-          cpu='{"backend":"cpu","runs_on":["self-hosted","cpu"],"frx_platforms":"cpu","flags":"'"${rbe}"'"}'
-          gpu='{"backend":"gpu","runs_on":["self-hosted","gpu"],"frx_platforms":"cuda","flags":"--test_env=XLA_PYTHON_CLIENT_PREALLOCATE=false"}'
-          include="${cpu}"
-          if [ "${{ vars.HAS_GPU_RUNNER }}" = "true" ]; then
-            include="${cpu},${gpu}"
-          fi
-          echo "matrix={\"include\":[${include}]}" >> "$GITHUB_OUTPUT"
-          # A CLI --test_tag_filters *replaces* .bazelrc.ci's, so an empty one
-          # is how the sweep drops the `slow_kat` exclusion.
-          tag_filters=""
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            tag_filters="--test_tag_filters="
-          fi
-          echo "tag_filters=${tag_filters}" >> "$GITHUB_OUTPUT"
-
+  # Two legs, and both are required. The CPU leg checks the schemes against
+  # their published vectors; the GPU leg is what the batch-throughput claims
+  # rest on — AES-GCM and ML-KEM promise batch performance on a GPU, and a
+  # fusion marker that stops being recognized still produces the right bytes
+  # on CPU. Runners are labelled by capability, not role: a CPU box is
+  # `[self-hosted, cpu]`, a GPU box `[self-hosted, gpu]`, so each leg lands on
+  # a box that advertises what it needs.
+  #
+  # The matrix is static: both legs run on every pull request. Gating the GPU
+  # leg on a repo variable would turn a required check into one that never
+  # reports, which leaves pull requests pending forever rather than red (#27
+  # retired the gated form once a GPU runner served this repo).
   build-and-test:
     # Explicit name; else GitHub appends every matrix value (incl. the long
     # --config=remote + cert-path rbe flags) to the auto-generated job name.
     name: build-and-test (${{ matrix.backend }})
-    needs: setup
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+      matrix:
+        include:
+          # The CPU leg executes on the Buildbarn pool (`--config=remote`);
+          # the mTLS client material is machine-local, so the paths point at
+          # the runner's own /etc/rbe-certs.
+          - backend: cpu
+            runs_on: [self-hosted, cpu]
+            frx_platforms: cpu
+            flags: >-
+              --config=remote
+              --tls_certificate=/etc/rbe-certs/ca.pem
+              --tls_client_certificate=/etc/rbe-certs/client.pem
+              --tls_client_key=/etc/rbe-certs/client.key
+          # The pool is CPU-only, so the GPU leg runs local with no remote
+          # flags; strict `cuda` (no cpu fallback) proves a green leg ran on
+          # the device, and prealloc is off because bazel runs test actions
+          # concurrently against the one device.
+          - backend: gpu
+            runs_on: [self-hosted, gpu]
+            frx_platforms: cuda
+            flags: --test_env=XLA_PYTHON_CLIENT_PREALLOCATE=false
     runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
       # No setup-bazel: it clobbers the box's ~/.bazelrc (self-hosted runners
       # already persist bazel + caches). `.bazelrc.ci` is not auto-imported.
+      #
+      # The scheduled sweep passes an empty --test_tag_filters because a CLI
+      # value *replaces* .bazelrc.ci's — an empty one is how the sweep drops
+      # the `slow_kat` exclusion.
       - name: Run bazel test
         run: |
           set -euo pipefail
           bazel --bazelrc=.bazelrc.ci test ${{ matrix.flags }} \
-            ${{ needs.setup.outputs.tag_filters }} \
+            ${{ github.event_name == 'schedule' && '--test_tag_filters=' || '' }} \
             --test_env=FRX_PLATFORMS=${{ matrix.frx_platforms }} -- //...
 
       # Capture the runner-local test.log a failed test leaves behind — the CI
