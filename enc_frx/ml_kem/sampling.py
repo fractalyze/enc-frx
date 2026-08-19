@@ -46,23 +46,43 @@ undersized budget passes every ordinary vector ever published and fails only
 there.
 
 **A miss is deterministic, not undefined.** Below 256 acceptances every unfilled
-slot reads the final candidate and the result is a wrong array — the same wrong
-array on every backend, because `_compact` clamps the index itself rather than
-leaving the gather's out-of-bounds behaviour to XLA. Nothing detects it, and
-nothing should: a validity flag threaded through the whole scheme for a 2^-261
-event would be dead weight that the seams would have to carry, and `Kem.decaps`
-has no failure channel to carry it in anyway.
+slot holds zero and the result is a wrong array — the same wrong array on every
+backend and in both compaction forms below, which each pin that edge themselves
+rather than leaving an out-of-range index to XLA. Nothing detects it, and nothing
+should: a validity flag threaded through the whole scheme for a 2^-261 event
+would be dead weight that the seams would have to carry, and `Kem.decaps` has no
+failure channel to carry it in anyway.
 
-## Compaction is a gather
+## Compaction is a scatter, or a search, and the backend decides
 
-Selecting the accepted candidates in order is a stream compaction, and the
-obvious form — scatter each accepted value to its rank — is the wrong one here:
-XLA serializes a large scatter on GPU, so it costs far more than the sampling it
-serves. The inverse is a gather. With `rank = cumsum(accepted)`, the source index
-of output slot `t` is `#{i : rank[i] <= t}`, which `searchsorted` answers
-directly, and `take_along_axis` then reads the values. No scatter, no sort, and
-no `while` — `searchsorted` is asked for the unrolled binary search so its trip
-count is static too.
+Selecting the accepted candidates in order is a stream compaction, and
+`rank = cumsum(accepted)` is what orders it: the candidate at position `i`, if
+accepted, belongs in output slot `rank[i] - 1`. There are two ways to act on
+that, and they differ in which side they iterate.
+
+- **Scatter** — write each accepted candidate to the slot its rank names. One
+  pass over the 560 candidates, at an index the cumsum already produced, with
+  writes that are disjoint by construction.
+- **Search** — ask, for each of the 256 output slots, which candidate feeds it.
+  The answer is `#{i : rank[i] <= t}`, which `searchsorted` gives and
+  `take_along_axis` then reads. It costs a binary search per slot and uses
+  nothing of what makes `rank` special, which is that it steps by one.
+
+The textbook reason to prefer the search is that a large scatter serializes.
+That is a statement about a backend and not about this compaction, so it is read
+off the backend rather than assumed. On GPU the scatter is the whole reason this
+stage stopped being the expensive one: at `B = 8192` it takes `SampleNTT` from
+2.01 ms to 1.02 ms and a whole ML-KEM-768 decapsulation from 3.06 ms to 1.76 ms,
+and it retires a >1 s constant-fold of the search's unrolled index arithmetic at
+compile time. On CPU the same substitution costs 1.42× at `B = 256` and only
+repays above roughly four times that, so the CPU keeps the search.
+
+Both forms return the same array for every input, including under the miss
+above, and `CompactionFormTest` is what holds them to that rather than the claim
+being made here. Neither needs a `while`, which is not negotiable in this module:
+the scatter's trip count is the candidate count and the search is asked for the
+unrolled binary variant, so both are fixed. `TracedShapeTest` reads the form back
+off the lowering, because the source cannot show it.
 """
 
 from __future__ import annotations
@@ -110,32 +130,83 @@ def _candidates(stream: Array) -> Array:
     return fnp.stack([d1, d2], axis=-1).reshape(*stream.shape[:-1], CANDIDATES)
 
 
-def _compact(candidates: Array) -> Array:
-    """The first 256 candidates below `q`, in order: `[B, 560] -> [B, 256]`.
+# Which backends compact by scattering. A tuple rather than a test against `cpu`,
+# and for the same reason `hash_frx.keccak.permutation` keeps one for its emitter:
+# a backend is on the search path until the scatter is *measured* to win on it, so
+# a leg that earns the scatter joins this tuple and nothing else here moves.
+_SCATTER_BACKENDS = ("gpu",)
 
-    `rank` is the running count of acceptances, so it is non-decreasing and the
-    first index at which it exceeds `t` is where output slot `t` comes from.
-    Asking `searchsorted` on the right side answers that for all 256 slots at
-    once.
 
-    **The clamp is not redundant.** Under the 2^-261 miss, `searchsorted` returns
-    `CANDIDATES` for every unfilled slot — one past the end. Left alone, the
-    gather's out-of-bounds behaviour is the backend's to define, and it is not
-    the intuitive one: it fills with `INT32_MIN` rather than clamping. Pinning
-    the index here makes the miss read the final candidate instead, which is what
-    lets the module docstring promise the same wrong array everywhere rather than
-    whatever each backend does at the edge.
+def _compacts_by_scatter() -> bool:
+    """Whether this backend writes each candidate out or searches for it.
+
+    Read per call rather than at import, so importing this module does not
+    initialize a backend and so a test can pin either answer. The lookup behind
+    `frx.default_backend()` is memoized, so it is cheap enough to sit on the
+    tracing path of every matrix expansion.
     """
-    # `int16` because `rank` counts acceptances among `CANDIDATES` of them and so
-    # cannot leave `[0, 560]`: the unrolled binary search below compares the whole
-    # rank row against every slot, and halving its width halves that traffic.
-    rank = fnp.cumsum((candidates < np.int32(Q)).astype(np.int16), axis=-1)
+    return frx.default_backend() in _SCATTER_BACKENDS
+
+
+def _scattered(candidates: Array, accepted: Array, rank: Array) -> Array:
+    """Each accepted candidate written to the slot its rank names.
+
+    **The drop is not redundant.** A rejected candidate has no slot, and under
+    the 2^-261 miss neither has anything from slot 256 up; both are aimed at `N`,
+    one past the end, where `mode="drop"` discards them rather than letting XLA
+    decide what an out-of-range write does. What is left in an unwritten slot is
+    the zero its row started at, which is what `_searched` puts there too.
+
+    Seeding the row with anything the input has to be read for — the final
+    candidate, say — would cost more than it looks: it keeps `candidates` live
+    across the write and stops the expansion fusing into the program around it,
+    which is paid whole even though this function on its own gets slightly
+    faster.
+    """
+    slot = fnp.where(accepted, (rank - np.int16(1)).astype(np.int32), np.int32(N))
+
+    def row(values: Array, target: Array) -> Array:
+        return fnp.zeros(N, dtype=values.dtype).at[target].set(values, mode="drop")
+
+    return frx.vmap(row)(candidates, slot)
+
+
+def _searched(candidates: Array, rank: Array) -> Array:
+    """For each slot, the candidate feeding it, found by binary search.
+
+    **Neither the clamp nor the select is redundant.** Under the 2^-261 miss,
+    `searchsorted` returns `CANDIDATES` for every unfilled slot — one past the
+    end. The clamp is what keeps the read itself in bounds, because an
+    out-of-range gather is the backend's to define and it is not the intuitive
+    one: it fills with `INT32_MIN` rather than clamping. The select is then what
+    decides the value, and it says zero, because that is what `_scattered` leaves
+    in the same slots and the module docstring promises the two forms agree.
+    """
     slots = fnp.arange(N, dtype=np.int16)
     picked = frx.vmap(
         lambda row: fnp.searchsorted(row, slots, side="right", method="scan_unrolled")
     )(rank)
     clamped = fnp.minimum(picked, np.int32(CANDIDATES - 1))
-    return fnp.take_along_axis(candidates, clamped, axis=-1)
+    taken = fnp.take_along_axis(candidates, clamped, axis=-1)
+    return fnp.where(picked < np.int32(CANDIDATES), taken, np.int32(0))
+
+
+def _compact(candidates: Array) -> Array:
+    """The first 256 candidates below `q`, in order: `[B, 560] -> [B, 256]`.
+
+    `rank` is the running count of acceptances, so the candidate at position `i`,
+    if accepted, belongs in output slot `rank[i] - 1`. Both forms below answer
+    that and return the same array; the module docstring says why which one runs
+    is the backend's answer rather than this module's.
+    """
+    accepted = candidates < np.int32(Q)
+    # `int16` because `rank` counts acceptances among `CANDIDATES` of them and so
+    # cannot leave `[0, 560]`: the search form compares the whole rank row against
+    # every one of the 256 slots, and halving its width halves that traffic.
+    rank = fnp.cumsum(accepted.astype(np.int16), axis=-1)
+    if _compacts_by_scatter():
+        return _scattered(candidates, accepted, rank)
+    return _searched(candidates, rank)
 
 
 def sample_ntt(seeds: ArrayLike) -> Array:
