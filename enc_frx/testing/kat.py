@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -186,64 +186,70 @@ _ACVP_IGNORED_FIELDS = frozenset(
 _ACVP_KEYGEN_FUNCTION = "keygen"
 
 
-def load_acvp_ml_kem(
+def _acvp_cases(
     prompt_path: Path | str, expected_path: Path | str
-) -> list[KemVector]:
-    """Normalize one ACVP ML-KEM set — a `(prompt, expectedResults)` pair."""
+) -> Iterator[tuple[dict[str, Any], int, int, dict[str, Any]]]:
+    """One `(group, tgId, tcId, merged)` per case of an ACVP pair.
+
+    The join every ACVP loader shares: prompt.json holds the inputs and
+    expectedResults.json the outputs, matched on `(tgId, tcId)`. Group-level
+    fields are merged under the test's own, which win — ACVP puts a field at
+    whichever level it is constant, and that level differs per set.
+    """
     prompt = json.loads(Path(prompt_path).read_text())
     expected = json.loads(Path(expected_path).read_text())
-
     results = {
         (group["tgId"], test["tcId"]): test
         for group in expected["testGroups"]
         for test in group["tests"]
     }
-
-    vectors: list[KemVector] = []
     for group in prompt["testGroups"]:
-        parameter_set = group["parameterSet"]
-        function = group.get("function", _ACVP_KEYGEN_FUNCTION)
         for test in group["tests"]:
             key = (group["tgId"], test["tcId"])
             if key not in results:
                 raise KatError(
-                    f"{parameter_set} tg{key[0]}/tc{key[1]} has no expected result; "
-                    f"the prompt and expectedResults files are not a matching pair"
+                    f"tg{key[0]}/tc{key[1]} has no expected result; the prompt "
+                    f"and expectedResults files are not a matching pair"
                 )
-            # Group-level fields are merged under the test's own, which win —
-            # ACVP puts a field at whichever level it is constant, and that level
-            # differs per set.
-            merged = {**group, **results[key], **test}
-            fields: dict[str, Any] = {
-                dest: bytes.fromhex(merged[src])
-                for src, dest in _ACVP_BYTE_FIELDS.items()
-                if src in merged
-            }
-            seed = b"".join(
-                bytes.fromhex(merged[name])
-                for name in _ACVP_SEED_FIELDS
-                if name in merged
+            yield group, key[0], key[1], {**group, **results[key], **test}
+
+
+def load_acvp_ml_kem(
+    prompt_path: Path | str, expected_path: Path | str
+) -> list[KemVector]:
+    """Normalize one ACVP ML-KEM set — a `(prompt, expectedResults)` pair."""
+    vectors: list[KemVector] = []
+    for group, tg_id, tc_id, merged in _acvp_cases(prompt_path, expected_path):
+        parameter_set = group["parameterSet"]
+        function = group.get("function", _ACVP_KEYGEN_FUNCTION)
+        fields: dict[str, Any] = {
+            dest: bytes.fromhex(merged[src])
+            for src, dest in _ACVP_BYTE_FIELDS.items()
+            if src in merged
+        }
+        seed = b"".join(
+            bytes.fromhex(merged[name]) for name in _ACVP_SEED_FIELDS if name in merged
+        )
+        unsupported = tuple(
+            sorted(
+                name
+                for name in merged
+                if name not in _ACVP_IGNORED_FIELDS
+                and name not in _ACVP_BYTE_FIELDS
+                and name not in _ACVP_SEED_FIELDS
             )
-            unsupported = tuple(
-                sorted(
-                    name
-                    for name in merged
-                    if name not in _ACVP_IGNORED_FIELDS
-                    and name not in _ACVP_BYTE_FIELDS
-                    and name not in _ACVP_SEED_FIELDS
-                )
+        )
+        vectors.append(
+            KemVector(
+                case_id=f"{parameter_set}/{function}/tg{tg_id}/tc{tc_id}",
+                parameter_set=parameter_set,
+                function=function,
+                seed=seed or None,
+                valid=merged.get("testPassed"),
+                unsupported=unsupported,
+                **fields,
             )
-            vectors.append(
-                KemVector(
-                    case_id=f"{parameter_set}/{function}/tg{key[0]}/tc{key[1]}",
-                    parameter_set=parameter_set,
-                    function=function,
-                    seed=seed or None,
-                    valid=merged.get("testPassed"),
-                    unsupported=unsupported,
-                    **fields,
-                )
-            )
+        )
     return vectors
 
 
@@ -667,6 +673,36 @@ def group_aead_by_shape(vectors: Sequence[AeadVector]) -> list[list[AeadVector]]
     return list(groups.values())
 
 
+def smallest_tamperable_group(vector_set: AeadVectorSet) -> list[AeadVector]:
+    """The smallest shape group carrying both an AAD and a payload — the batch
+    a per-PR gate hands to `check_aead`'s tampering pass.
+
+    Both parts non-empty so all four tamperings say something: a flipped
+    associated-data byte is skipped when there is no associated data, and a
+    flipped *first ciphertext byte* lands inside the tag when the payload is
+    empty — the tag tampering over again rather than a second check. Smallest,
+    because the tampering pass is quadratic in the group; the long payloads
+    are a sweep's job.
+    """
+    groups = [
+        group
+        for group in group_aead_by_shape(vector_set.vectors)
+        if group[0].associated_data and len(group[0].ciphertext) > vector_set.tag_size
+    ]
+    if not groups:
+        raise KatError(
+            "no shape group with both an AAD and a payload; the tampering "
+            "pass would be checking the tag twice"
+        )
+    return min(
+        groups,
+        key=lambda group: (
+            len(group[0].associated_data or b""),
+            len(group[0].ciphertext),
+        ),
+    )
+
+
 _ACVP_AES_IGNORED_FIELDS = frozenset(
     {"tgId", "tcId", "testType", "direction", "keyLen", "tests", "payloadLen"}
 )
@@ -691,56 +727,39 @@ def load_acvp_aes(
     caller that runs only encryption has to *refuse* the rest, and it cannot
     refuse what the loader silently dropped.
     """
-    prompt = json.loads(Path(prompt_path).read_text())
-    expected = json.loads(Path(expected_path).read_text())
-
-    results = {
-        (group["tgId"], test["tcId"]): test
-        for group in expected["testGroups"]
-        for test in group["tests"]
-    }
-
     vectors: list[AesVector] = []
-    for group in prompt["testGroups"]:
+    for group, tg_id, tc_id, merged in _acvp_cases(prompt_path, expected_path):
         parameter_set = f"AES-{group['keyLen']}"
-        for test in group["tests"]:
-            key = (group["tgId"], test["tcId"])
-            if key not in results:
-                raise KatError(
-                    f"{parameter_set} tg{key[0]}/tc{key[1]} has no expected result; "
-                    f"the prompt and expectedResults files are not a matching pair"
-                )
-            merged = {**group, **results[key], **test}
-            fields = {
-                dest: bytes.fromhex(merged[src])
-                for src, dest in _ACVP_AES_BYTE_FIELDS.items()
-                if src in merged
-            }
-            unsupported = tuple(
-                sorted(
-                    name
-                    for name in merged
-                    if name not in _ACVP_AES_IGNORED_FIELDS
-                    and name not in _ACVP_AES_BYTE_FIELDS
-                )
+        fields = {
+            dest: bytes.fromhex(merged[src])
+            for src, dest in _ACVP_AES_BYTE_FIELDS.items()
+            if src in merged
+        }
+        unsupported = tuple(
+            sorted(
+                name
+                for name in merged
+                if name not in _ACVP_AES_IGNORED_FIELDS
+                and name not in _ACVP_AES_BYTE_FIELDS
             )
-            vectors.append(
-                AesVector(
-                    case_id=(
-                        f"{parameter_set}/{group['direction']}/{group['testType']}"
-                        f"/tg{key[0]}/tc{key[1]}"
-                    ),
-                    parameter_set=parameter_set,
-                    direction=group["direction"],
-                    test_type=group["testType"],
-                    key=fields.get("key", b""),
-                    plaintext=fields.get("plaintext", b""),
-                    ciphertext=fields.get("ciphertext", b""),
-                    iv=fields.get("iv", b""),
-                    payload_bits=merged.get("payloadLen", 0),
-                    unsupported=unsupported,
-                )
+        )
+        vectors.append(
+            AesVector(
+                case_id=(
+                    f"{parameter_set}/{group['direction']}/{group['testType']}"
+                    f"/tg{tg_id}/tc{tc_id}"
+                ),
+                parameter_set=parameter_set,
+                direction=group["direction"],
+                test_type=group["testType"],
+                key=fields.get("key", b""),
+                plaintext=fields.get("plaintext", b""),
+                ciphertext=fields.get("ciphertext", b""),
+                iv=fields.get("iv", b""),
+                payload_bits=merged.get("payloadLen", 0),
+                unsupported=unsupported,
             )
+        )
     return vectors
 
 
@@ -781,45 +800,27 @@ def load_acvp_ccm(
     case whose expected result is `testPassed: false` becomes `valid=False`
     with an empty plaintext — the published rejection, not one made here.
     """
-    prompt = json.loads(Path(prompt_path).read_text())
-    expected = json.loads(Path(expected_path).read_text())
-
-    results = {
-        (group["tgId"], test["tcId"]): test
-        for group in expected["testGroups"]
-        for test in group["tests"]
-    }
-
     grouped: dict[tuple[int, int, int], list[AeadVector]] = {}
-    for group in prompt["testGroups"]:
+    for group, tg_id, tc_id, merged in _acvp_cases(prompt_path, expected_path):
         sizes = (group["keyLen"] // 8, group["ivLen"] // 8, group["tagLen"] // 8)
         parameter_set = f"AES-{group['keyLen']}-CCM/iv{sizes[1]}/tag{sizes[2]}"
-        for test in group["tests"]:
-            key = (group["tgId"], test["tcId"])
-            if key not in results:
-                raise KatError(
-                    f"{parameter_set} tg{key[0]}/tc{key[1]} has no expected "
-                    f"result; the prompt and expectedResults files are not a "
-                    f"matching pair"
-                )
-            merged = {**group, **results[key], **test}
-            unsupported = tuple(
-                sorted(name for name in merged if name not in _ACVP_CCM_KNOWN_FIELDS)
+        unsupported = tuple(
+            sorted(name for name in merged if name not in _ACVP_CCM_KNOWN_FIELDS)
+        )
+        aad = bytes.fromhex(merged.get("aad", ""))
+        grouped.setdefault(sizes, []).append(
+            AeadVector(
+                case_id=f"{parameter_set}/tg{tg_id}/tc{tc_id}",
+                parameter_set=parameter_set,
+                key=bytes.fromhex(merged["key"]),
+                nonce=bytes.fromhex(merged["iv"]),
+                plaintext=bytes.fromhex(merged.get("pt", "")),
+                ciphertext=bytes.fromhex(merged["ct"]),
+                associated_data=aad or None,
+                valid=bool(merged.get("testPassed", True)),
+                unsupported=unsupported,
             )
-            aad = bytes.fromhex(merged.get("aad", ""))
-            grouped.setdefault(sizes, []).append(
-                AeadVector(
-                    case_id=f"{parameter_set}/tg{key[0]}/tc{key[1]}",
-                    parameter_set=parameter_set,
-                    key=bytes.fromhex(merged["key"]),
-                    nonce=bytes.fromhex(merged["iv"]),
-                    plaintext=bytes.fromhex(merged.get("pt", "")),
-                    ciphertext=bytes.fromhex(merged["ct"]),
-                    associated_data=aad or None,
-                    valid=bool(merged.get("testPassed", True)),
-                    unsupported=unsupported,
-                )
-            )
+        )
 
     return [
         AeadVectorSet(

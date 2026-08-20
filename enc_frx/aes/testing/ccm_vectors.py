@@ -19,6 +19,7 @@ from enc_frx.testing.kat import (
     AeadVectorSet,
     group_aead_by_shape,
     load_acvp_ccm,
+    smallest_tamperable_group,
 )
 
 
@@ -55,26 +56,16 @@ def instance(key_size: int, nonce_size: int, tag_size: int) -> AeadVectorSet:
 
 
 def gate_batch(vector_set: AeadVectorSet) -> list[AeadVector]:
-    """What the per-PR gate runs for one instance: the smallest shape group
-    carrying both an AAD and a payload (so all four tamperings bite — the
-    rationale `gcm_vectors._gate_group` states), plus the smallest group
-    carrying a published rejection, so the mixed-validity masking path runs
-    against the standard's own failures rather than only synthesized ones."""
-    groups = group_aead_by_shape(vector_set.vectors)
-    tampering = [
+    """What the per-PR gate runs for one instance: the harness's smallest
+    tamperable group, plus the smallest group carrying a published rejection,
+    so the mixed-validity masking path runs against the standard's own
+    failures rather than only synthesized ones."""
+    chosen = smallest_tamperable_group(vector_set)
+    mixed = [
         group
-        for group in groups
-        if group[0].associated_data and len(group[0].ciphertext) > vector_set.tag_size
+        for group in group_aead_by_shape(vector_set.vectors)
+        if any(not vector.valid for vector in group)
     ]
-    assert tampering, "ACVP publishes sections with both an AAD and a payload"
-    chosen = min(
-        tampering,
-        key=lambda group: (
-            len(group[0].associated_data or b""),
-            len(group[0].ciphertext),
-        ),
-    )
-    mixed = [group for group in groups if any(not vector.valid for vector in group)]
     if mixed:
         chosen = chosen + min(mixed, key=lambda group: len(group[0].ciphertext))
     return chosen

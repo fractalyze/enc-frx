@@ -20,8 +20,8 @@ from python.runfiles import runfiles
 from enc_frx.testing.kat import (
     AeadVector,
     AeadVectorSet,
-    group_aead_by_shape,
     load_cavp_gcm,
+    smallest_tamperable_group,
 )
 
 # One file per key length and direction, which is how CAVP splits the set. The
@@ -98,34 +98,10 @@ def stack(items: Sequence[bytes]) -> Array:
 
 
 def _gate_group(vector_set: AeadVectorSet) -> list[AeadVector]:
-    """The shape group the gate runs: the smallest with both a payload and an AAD.
-
-    Partitioned by the harness's own `group_aead_by_shape`, so the batch selected
-    here is by construction a batch the driver will form rather than one that
-    merely resembles it.
-
-    Both parts non-empty so that all four of the harness's tamperings say
-    something. A flipped associated-data byte is skipped when there is no
-    associated data, and a flipped *first ciphertext byte* lands inside the tag
-    when the payload is empty — which is the tag tampering over again rather than
-    a second check.
-
-    Smallest, because the gate runs on every PR and the tampering pass is
-    quadratic in the group; the long payloads are the sweep's job.
-    """
-    groups = [
-        group
-        for group in group_aead_by_shape(vector_set.vectors)
-        if group[0].associated_data and len(group[0].ciphertext) > vector_set.tag_size
-    ]
-    assert groups, "a CAVP instance publishes sections with both an AAD and a payload"
-    return min(
-        groups,
-        key=lambda group: (
-            len(group[0].associated_data or b""),
-            len(group[0].ciphertext),
-        ),
-    )
+    """The shape group the gate runs — the harness's own selection policy
+    (`kat.smallest_tamperable_group` states why smallest, and why both an AAD
+    and a payload)."""
+    return smallest_tamperable_group(vector_set)
 
 
 def accepted_batch(vector_set: AeadVectorSet, size: int) -> list[AeadVector]:
