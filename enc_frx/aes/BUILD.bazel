@@ -104,7 +104,6 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":block",
-        ":ghash",
         "//enc_frx:aead",
         requirement("frx"),
         requirement("numpy"),

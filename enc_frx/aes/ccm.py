@@ -35,7 +35,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from enc_frx.aead import Aead
-from enc_frx.aes import block, ghash
+from enc_frx.aes import block
 
 BLOCK_SIZE = 16
 
@@ -199,7 +199,7 @@ class AesCcm:
         if aad_len:
             prefix = self._aad_prefix(aad_len)
             sections.append(
-                ghash.pad_to_blocks(
+                block.pad_to_blocks(
                     fnp.concatenate(
                         [
                             fnp.broadcast_to(
@@ -212,7 +212,7 @@ class AesCcm:
                 )
             )
         if plaintext.shape[-1]:
-            sections.append(ghash.pad_to_blocks(plaintext))
+            sections.append(block.pad_to_blocks(plaintext))
         blocks = fnp.concatenate(sections, axis=-2)
 
         state = fnp.zeros((*batch, BLOCK_SIZE), dtype=fnp.uint8)
@@ -230,11 +230,14 @@ class AesCcm:
         trace-time constants beside the nonce."""
         batch = nonce.shape[:-1]
         blocks = -(-length // BLOCK_SIZE)
-        indices = np.zeros((blocks + 1, self._q), dtype=np.uint8)
-        for position in range(self._q):
-            shift = 8 * (self._q - 1 - position)
-            if shift < 64:
-                indices[:, position] = (np.arange(blocks + 1) >> shift) & 0xFF
+        # The same big-endian encoding `_tag` writes with to_bytes; an index
+        # that no longer fits q bytes raises here at trace time, which is the
+        # standard's payload-per-nonce bound surfacing rather than a silent
+        # wrap.
+        indices = np.frombuffer(
+            b"".join(i.to_bytes(self._q, "big") for i in range(blocks + 1)),
+            dtype=np.uint8,
+        ).reshape(blocks + 1, self._q)
         counters = fnp.concatenate(
             [
                 fnp.broadcast_to(
@@ -248,8 +251,7 @@ class AesCcm:
             ],
             axis=-1,
         )
-        shared = [k[..., None, :, :] for k in schedule]
-        stream = block.encrypt_with_schedule(shared, counters)
+        stream = block.encrypt_blocks(schedule, counters)
         mask = stream[..., 0, :]
         keystream = stream[..., 1:, :].reshape(*batch, blocks * BLOCK_SIZE)
         return mask, keystream[..., :length]
