@@ -744,6 +744,94 @@ def load_acvp_aes(
     return vectors
 
 
+# ACVP's CCM groups carry the AEAD parameter triple alongside the direction, and
+# its decrypt expected-results carry `testPassed: false` where CAVP's GCM files
+# write `FAIL` — same published-negative property, different spelling.
+_ACVP_CCM_KNOWN_FIELDS = frozenset(
+    {
+        "tgId",
+        "tcId",
+        "testType",
+        "direction",
+        "keyLen",
+        "ivLen",
+        "tagLen",
+        "payloadLen",
+        "aadLen",
+        "tests",
+        "testPassed",
+        "key",
+        "iv",
+        "aad",
+        "pt",
+        "ct",
+    }
+)
+
+
+def load_acvp_ccm(
+    prompt_path: Path | str, expected_path: Path | str
+) -> list[AeadVectorSet]:
+    """Normalize one ACVP AES-CCM set — a `(prompt, expectedResults)` pair.
+
+    One `AeadVectorSet` per (key, nonce, tag) size triple, both directions
+    merged: an encrypt case's `ct` lives in the expected file and a decrypt
+    case's in the prompt, but both are the same `body ‖ tag` layout, so a
+    normalized case is direction-free the way `check_aead` wants it. A decrypt
+    case whose expected result is `testPassed: false` becomes `valid=False`
+    with an empty plaintext — the published rejection, not one made here.
+    """
+    prompt = json.loads(Path(prompt_path).read_text())
+    expected = json.loads(Path(expected_path).read_text())
+
+    results = {
+        (group["tgId"], test["tcId"]): test
+        for group in expected["testGroups"]
+        for test in group["tests"]
+    }
+
+    grouped: dict[tuple[int, int, int], list[AeadVector]] = {}
+    for group in prompt["testGroups"]:
+        sizes = (group["keyLen"] // 8, group["ivLen"] // 8, group["tagLen"] // 8)
+        parameter_set = f"AES-{group['keyLen']}-CCM/iv{sizes[1]}/tag{sizes[2]}"
+        for test in group["tests"]:
+            key = (group["tgId"], test["tcId"])
+            if key not in results:
+                raise KatError(
+                    f"{parameter_set} tg{key[0]}/tc{key[1]} has no expected "
+                    f"result; the prompt and expectedResults files are not a "
+                    f"matching pair"
+                )
+            merged = {**group, **results[key], **test}
+            unsupported = tuple(
+                sorted(name for name in merged if name not in _ACVP_CCM_KNOWN_FIELDS)
+            )
+            aad = bytes.fromhex(merged.get("aad", ""))
+            grouped.setdefault(sizes, []).append(
+                AeadVector(
+                    case_id=f"{parameter_set}/tg{key[0]}/tc{key[1]}",
+                    parameter_set=parameter_set,
+                    key=bytes.fromhex(merged["key"]),
+                    nonce=bytes.fromhex(merged["iv"]),
+                    plaintext=bytes.fromhex(merged.get("pt", "")),
+                    ciphertext=bytes.fromhex(merged["ct"]),
+                    associated_data=aad or None,
+                    valid=bool(merged.get("testPassed", True)),
+                    unsupported=unsupported,
+                )
+            )
+
+    return [
+        AeadVectorSet(
+            key_size=sizes[0],
+            nonce_size=sizes[1],
+            tag_size=sizes[2],
+            vectors=tuple(vectors),
+        )
+        for sizes, vectors in sorted(grouped.items())
+    ]
+
+
 # CAVS response files are flat text rather than JSON. `[Name = Value]` lines open
 # a section whose five lengths hold until the next one; `Name = Value` lines
 # accumulate into a case that `Count` opens; and a decrypt case the standard
