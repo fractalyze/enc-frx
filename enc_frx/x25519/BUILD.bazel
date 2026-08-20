@@ -15,3 +15,18 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# X25519 (RFC 7748 §5): clamp, Montgomery ladder, public-key derivation.
+py_library(
+    name = "x25519",
+    srcs = [
+        "__init__.py",
+        "x25519.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":field",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
