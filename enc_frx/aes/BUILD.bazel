@@ -93,3 +93,19 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# AES-CCM (SP 800-38C / RFC 3610) — CTR + CBC-MAC behind the Aead seam.
+py_library(
+    name = "ccm",
+    srcs = [
+        "__init__.py",
+        "ccm.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block",
+        "//enc_frx:aead",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

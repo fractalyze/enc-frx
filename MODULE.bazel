@@ -123,6 +123,23 @@ http_file(
     urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ACVP-AES-ECB-1.0/expectedResults.json"],
 )
 
+# ACVP's AES-CCM set gates the CCM AEAD. Its decrypt groups publish deliberate
+# failures (`testPassed: false`), which is what exercises the mixed-validity
+# masking path with published rather than synthesized rejections.
+http_file(
+    name = "acvp_aes_ccm_prompt",
+    downloaded_file_path = "prompt.json",
+    sha256 = "3dccb5874fe2ece4961891f3795b4f937ed7b8da5a9dafe270772a66ca221e84",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ACVP-AES-CCM-1.0/prompt.json"],
+)
+
+http_file(
+    name = "acvp_aes_ccm_expected",
+    downloaded_file_path = "expectedResults.json",
+    sha256 = "23eb3a5d1821ea821d00831369b0e006c1697e113bb8921759cf25da9eddca27",
+    urls = ["https://raw.githubusercontent.com/usnistgov/ACVP-Server/ad33b3d9504491767f1aa76382464f3b3fa2359e/gen-val/json-files/ACVP-AES-CCM-1.0/expectedResults.json"],
+)
+
 # ACVP's AES-CTR set. Its expected results carry the counter block the
 # implementation chose, so a case is `(key, iv, pt) -> ct` rather than the
 # prompt alone.
