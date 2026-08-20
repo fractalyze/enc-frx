@@ -209,3 +209,34 @@ def encrypt_block(key: ArrayLike, block: ArrayLike) -> Array:
     `encrypt_with_schedule`; see its docstring for what that saves.
     """
     return encrypt_with_schedule(key_schedule(key), block)
+
+
+def encrypt_blocks(round_keys: list[Array], blocks: ArrayLike) -> Array:
+    """`Nr + 1` round keys `[..., 4, 4]`, `uint8 [..., N, 16]` -> the same
+    shape encrypted: one schedule shared across a stack of blocks.
+
+    The share works by giving every round key a length-one block axis so it
+    broadcasts against the stack — the axis sits at `-3` because the state is
+    `[..., 4, 4]`. That placement is a fact about this module's state layout,
+    which is why the helper lives here rather than being respelled at every
+    mode's call site (CTR streams, GCM-SIV's key derivation, CCM's counters
+    all encrypt such stacks).
+    """
+    shared = [key[..., None, :, :] for key in round_keys]
+    return encrypt_with_schedule(shared, blocks)
+
+
+def pad_to_blocks(data: ArrayLike) -> Array:
+    """`uint8 [..., N]` -> `uint8 [..., ceil(N/16), 16]`, zero-padded.
+
+    `N` is static, so the padding is a constant-shaped concatenation. Byte
+    chunking, not field arithmetic — it lives with the block size it encodes,
+    and GHASH, GCM-SIV and CCM all format their inputs through it.
+    """
+    data = fnp.asarray(data, dtype=fnp.uint8)
+    length = data.shape[-1]
+    blocks = -(-length // BLOCK_SIZE)
+    padded = fnp.pad(
+        data, [(0, 0)] * (data.ndim - 1) + [(0, blocks * BLOCK_SIZE - length)]
+    )
+    return padded.reshape(*data.shape[:-1], blocks, BLOCK_SIZE)

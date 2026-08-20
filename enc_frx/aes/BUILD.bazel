@@ -23,6 +23,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":block",
         requirement("frx"),
         requirement("numpy"),
         requirement("zk_dtypes"),
@@ -57,5 +58,38 @@ py_library(
         ":ghash",
         "//enc_frx:aead",
         requirement("frx"),
+    ],
+)
+
+# POLYVAL (RFC 8452 §3) — GHASH's little-endian sibling, computed through the
+# Appendix A identity over the same field dtype.
+py_library(
+    name = "polyval",
+    srcs = [
+        "__init__.py",
+        "polyval.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ghash",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
+
+# AES-GCM-SIV (RFC 8452) — the nonce-misuse-resistant Aead.
+py_library(
+    name = "gcm_siv",
+    srcs = [
+        "__init__.py",
+        "gcm_siv.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block",
+        ":polyval",
+        "//enc_frx:aead",
+        requirement("frx"),
+        requirement("numpy"),
     ],
 )

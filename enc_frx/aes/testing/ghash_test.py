@@ -19,7 +19,7 @@ import frx.numpy as fnp
 import numpy as np
 from absl.testing import absltest, parameterized
 
-from enc_frx.aes import ghash
+from enc_frx.aes import block, ghash
 from enc_frx.aes.testing import gcm_reference
 
 
@@ -140,7 +140,7 @@ class HelperTest(absltest.TestCase):
     def test_padding_rounds_up_to_whole_blocks(self) -> None:
         for length, blocks in ((0, 0), (1, 1), (16, 1), (17, 2), (48, 3)):
             data = fnp.asarray(np.zeros((1, length), dtype=np.uint8))
-            self.assertEqual(ghash.pad_to_blocks(data).shape, (1, blocks, 16))
+            self.assertEqual(block.pad_to_blocks(data).shape, (1, blocks, 16))
 
 
 if __name__ == "__main__":

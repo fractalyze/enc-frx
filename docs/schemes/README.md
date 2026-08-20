@@ -9,6 +9,7 @@ readable.
 | ------ | ----- |
 | ChaCha20-Poly1305 and XChaCha20-Poly1305 (RFC 8439, draft-irtf-cfrg-xchacha) | [`chacha20-poly1305.md`](chacha20-poly1305.md) |
 | AES-GCM (NIST SP 800-38D) | [`aes-gcm.md`](aes-gcm.md) |
+| AES-GCM-SIV (RFC 8452) | [`aes-gcm-siv.md`](aes-gcm-siv.md) |
 | ML-KEM (FIPS 203) | [`ml-kem.md`](ml-kem.md) |
 
 The three questions every page answers — what the standard fixes versus what this

@@ -66,8 +66,7 @@ def keystream(round_keys: list[Array], counter: ArrayLike, blocks: int) -> Array
     """
     counter = fnp.asarray(counter, dtype=fnp.uint8)
     counter_blocks = _inc32(counter, blocks)
-    shared = [key[..., None, :, :] for key in round_keys]
-    encrypted = aes_block.encrypt_with_schedule(shared, counter_blocks)
+    encrypted = aes_block.encrypt_blocks(round_keys, counter_blocks)
     return encrypted.reshape(*counter.shape[:-1], blocks * BLOCK_SIZE)
 
 
