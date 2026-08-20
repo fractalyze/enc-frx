@@ -53,6 +53,7 @@ py_test(
     srcs = ["ghash_test.py"],
     deps = [
         ":gcm_reference",
+        "//enc_frx/aes:block",
         "//enc_frx/aes:ghash",
         requirement("absl_py"),
         requirement("frx"),

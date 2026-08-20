@@ -38,6 +38,8 @@ import zk_dtypes
 from frx import Array
 from frx.typing import ArrayLike
 
+from enc_frx.aes.block import pad_to_blocks
+
 BLOCK_SIZE = 16
 
 GF128 = zk_dtypes.binary_field_ghash
@@ -112,19 +114,6 @@ def length_block(first: int, second: int) -> Array:
             dtype=np.uint8,
         )
     )
-
-
-def pad_to_blocks(data: Array) -> Array:
-    """`uint8 [..., N]` -> `uint8 [..., ceil(N/16), 16]`, zero-padded.
-
-    `N` is static, so the padding is a constant-shaped concatenation.
-    """
-    length = data.shape[-1]
-    blocks = -(-length // BLOCK_SIZE)
-    padded = fnp.pad(
-        data, [(0, 0)] * (data.ndim - 1) + [(0, blocks * BLOCK_SIZE - length)]
-    )
-    return padded.reshape(*data.shape[:-1], blocks, BLOCK_SIZE)
 
 
 def hash_input(first: ArrayLike | None, second: ArrayLike) -> Array:
