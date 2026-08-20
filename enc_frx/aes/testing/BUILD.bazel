@@ -132,12 +132,37 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# RFC 8452 Appendix C, vendored. TEST ONLY.
+py_library(
+    name = "rfc8452_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "rfc8452_vectors.py",
+    ],
+    visibility = ["//enc_frx:__subpackages__"],
+)
+
 py_test(
     name = "polyval_test",
     size = "small",
     srcs = ["polyval_test.py"],
     deps = [
         "//enc_frx/aes:polyval",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+py_test(
+    name = "gcm_siv_test",
+    size = "medium",
+    srcs = ["gcm_siv_test.py"],
+    deps = [
+        ":rfc8452_vectors",
+        "//enc_frx/aes:gcm_siv",
+        "//enc_frx/testing:kat",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),

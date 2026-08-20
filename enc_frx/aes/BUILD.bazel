@@ -75,3 +75,21 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# AES-GCM-SIV (RFC 8452) — the nonce-misuse-resistant Aead.
+py_library(
+    name = "gcm_siv",
+    srcs = [
+        "__init__.py",
+        "gcm_siv.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block",
+        ":ghash",
+        ":polyval",
+        "//enc_frx:aead",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
