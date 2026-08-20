@@ -131,12 +131,20 @@ def square(element: Array) -> Array:
     return mul(element, element)
 
 
+def _square_step(_: Array, acc: Array) -> Array:
+    """The repeated-squaring loop body, at module level so `fori_loop`'s
+    lowering cache can hit — frx keys that cache on the body function's
+    identity (the gotcha `aes/ghash._absorb` measured), and a lambda minted
+    per call can never match."""
+    return square(acc)
+
+
 def invert(element: Array) -> Array:
     """`element^(p - 2)` by the standard 254-squaring addition chain for
     `2^255 - 21` — a fixed sequence, nothing data-dependent."""
 
     def pow2k(value: Array, squarings: int) -> Array:
-        return frx.lax.fori_loop(0, squarings, lambda _, acc: square(acc), value)
+        return frx.lax.fori_loop(0, squarings, _square_step, value)
 
     z2 = square(element)
     z9 = mul(pow2k(z2, 2), element)

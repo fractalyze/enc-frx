@@ -28,10 +28,11 @@ from enc_frx.x25519 import field
 
 KEY_SIZE = 32
 
-# a24 = (486662 - 2) / 4 for curve25519, as field limbs (121665 = 0x1DB41).
-_A24_LIMBS = np.zeros(field.LIMBS, dtype=np.uint32)
-_A24_LIMBS[0] = 0xDB41
-_A24_LIMBS[1] = 0x1
+# a24 = (486662 - 2) / 4 for curve25519, encoded as bytes so it enters the
+# field through `from_bytes` like every other value — the limb layout stays
+# field.py's own business, and a radix change there cannot strand a hand-laid
+# constant here.
+_A24_BYTES = np.frombuffer((121665).to_bytes(KEY_SIZE, "little"), dtype=np.uint8)
 
 
 def _clamp(scalar: Array) -> Array:
@@ -65,6 +66,35 @@ def _cswap(swap: Array, left: Array, right: Array) -> tuple[Array, Array]:
     return left ^ delta, right ^ delta
 
 
+def _ladder_step(index: Array, carry: tuple[Array, ...]) -> tuple[Array, ...]:
+    """One RFC 7748 §5 ladder iteration. The loop-invariants (`bits`, `x1`,
+    `a24`) ride the carry — where they cost nothing — instead of being closed
+    over, because frx keys the loop-body lowering cache on the body function's
+    identity (the gotcha `aes/ghash._absorb` measured): a closure minted per
+    `x25519` call would re-trace this ~10-multiply body every call."""
+    x2, z2, x3, z3, swap, bits, x1, a24 = carry
+    bit = frx.lax.dynamic_slice_in_dim(bits, 254 - index, 1, axis=-1)
+    swap = swap ^ bit
+    x2, x3 = _cswap(swap, x2, x3)
+    z2, z3 = _cswap(swap, z2, z3)
+    swap = bit
+
+    a = field.add(x2, z2)
+    aa = field.square(a)
+    b = field.sub(x2, z2)
+    bb = field.square(b)
+    e = field.sub(aa, bb)
+    c = field.add(x3, z3)
+    d = field.sub(x3, z3)
+    da = field.mul(d, a)
+    cb = field.mul(c, b)
+    x3 = field.square(field.add(da, cb))
+    z3 = field.mul(x1, field.square(field.sub(da, cb)))
+    x2 = field.mul(aa, bb)
+    z2 = field.mul(e, field.add(aa, field.mul(a24, e)))
+    return (x2, z2, x3, z3, swap, bits, x1, a24)
+
+
 def x25519(scalar: ArrayLike, u: ArrayLike) -> Array:
     """RFC 7748 X25519: uint8 `[B, 32]` scalars x u-coordinates -> uint8
     `[B, 32]` outputs, little-endian, per batch entry."""
@@ -78,35 +108,16 @@ def x25519(scalar: ArrayLike, u: ArrayLike) -> Array:
         fnp.concatenate([u[..., :31], u[..., 31:] & np.uint8(127)], axis=-1)
     )
 
-    a24 = fnp.broadcast_to(fnp.asarray(_A24_LIMBS), (*batch, field.LIMBS))
+    a24 = field.from_bytes(
+        fnp.broadcast_to(fnp.asarray(_A24_BYTES), (*batch, KEY_SIZE))
+    )
     x2, z2 = field.one(batch), field.zero(batch)
     x3, z3 = x1, field.one(batch)
     swap = fnp.zeros((*batch, 1), dtype=fnp.uint32)
 
-    def step(index: Array, carry: tuple[Array, ...]) -> tuple[Array, ...]:
-        x2, z2, x3, z3, swap = carry
-        bit = frx.lax.dynamic_slice_in_dim(bits, 254 - index, 1, axis=-1)
-        swap = swap ^ bit
-        x2, x3 = _cswap(swap, x2, x3)
-        z2, z3 = _cswap(swap, z2, z3)
-        swap = bit
-
-        a = field.add(x2, z2)
-        aa = field.square(a)
-        b = field.sub(x2, z2)
-        bb = field.square(b)
-        e = field.sub(aa, bb)
-        c = field.add(x3, z3)
-        d = field.sub(x3, z3)
-        da = field.mul(d, a)
-        cb = field.mul(c, b)
-        x3 = field.square(field.add(da, cb))
-        z3 = field.mul(x1, field.square(field.sub(da, cb)))
-        x2 = field.mul(aa, bb)
-        z2 = field.mul(e, field.add(aa, field.mul(a24, e)))
-        return (x2, z2, x3, z3, swap)
-
-    x2, z2, x3, z3, swap = frx.lax.fori_loop(0, 255, step, (x2, z2, x3, z3, swap))
+    x2, z2, x3, z3, swap, _, _, _ = frx.lax.fori_loop(
+        0, 255, _ladder_step, (x2, z2, x3, z3, swap, bits, x1, a24)
+    )
     x2, _ = _cswap(swap, x2, x3)
     z2, _ = _cswap(swap, z2, z3)
     return field.to_bytes(field.mul(x2, field.invert(z2)))
