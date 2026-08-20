@@ -168,3 +168,53 @@ py_test(
         requirement("numpy"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+# ACVP's AES-CCM pair and the gate-batch selection. TEST ONLY.
+py_library(
+    name = "ccm_vectors",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "ccm_vectors.py",
+    ],
+    data = [
+        "@acvp_aes_ccm_expected//file",
+        "@acvp_aes_ccm_prompt//file",
+    ],
+    visibility = ["//enc_frx:__subpackages__"],
+    deps = [
+        "//enc_frx/testing:kat",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_test(
+    name = "ccm_test",
+    size = "medium",
+    srcs = ["ccm_test.py"],
+    deps = [
+        ":ccm_vectors",
+        "//enc_frx/aes:ccm",
+        "//enc_frx/testing:kat",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The exhaustive pass: every one of ACVP's 8310 CCM cases. Dropped from the
+# per-PR run by .bazelrc.ci and put back by the scheduled one — `ccm_test` is
+# what gates a merge.
+py_test(
+    name = "ccm_sweep_test",
+    size = "enormous",
+    srcs = ["ccm_sweep_test.py"],
+    shard_count = 3,
+    tags = ["slow_kat"],
+    deps = [
+        ":ccm_vectors",
+        "//enc_frx/aes:ccm",
+        "//enc_frx/testing:kat",
+        requirement("absl_py"),
+    ] + GPU_PLUGIN_DEPS,
+)
