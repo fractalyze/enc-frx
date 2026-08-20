@@ -1,0 +1,17 @@
+load("@enc_frx_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_library")
+
+# GF(2^255 - 19) on uint32 lanes — 16-bit limbs with half-product
+# accumulation, the no-64-bit-lane layout (cf. chacha/poly1305.py).
+py_library(
+    name = "field",
+    srcs = [
+        "__init__.py",
+        "field.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
