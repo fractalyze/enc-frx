@@ -40,7 +40,7 @@ from frx import Array
 from frx.typing import ArrayLike
 
 from enc_frx.aead import Aead
-from enc_frx.aes import block, ghash, polyval
+from enc_frx.aes import block, polyval
 
 BLOCK_SIZE = 16
 NONCE_SIZE = 12
@@ -142,8 +142,7 @@ class AesGcmSiv:
             axis=-1,
         )
         schedule = block.key_schedule(key)
-        shared = [k[..., None, :, :] for k in schedule]
-        halves = block.encrypt_with_schedule(shared, blocks_in)[..., :8]
+        halves = block.encrypt_blocks(schedule, blocks_in)[..., :8]
         derived = halves.reshape(*key.shape[:-1], count * 8)
         auth_key = derived[..., :BLOCK_SIZE]
         enc_key = derived[..., BLOCK_SIZE : BLOCK_SIZE + self.key_size]
@@ -166,8 +165,8 @@ class AesGcmSiv:
         lengths = polyval.length_block(associated_data.shape[-1], plaintext.shape[-1])
         blocks_in = fnp.concatenate(
             [
-                ghash.pad_to_blocks(associated_data),
-                ghash.pad_to_blocks(plaintext),
+                block.pad_to_blocks(associated_data),
+                block.pad_to_blocks(plaintext),
                 fnp.broadcast_to(lengths, (*plaintext.shape[:-1], 1, BLOCK_SIZE)),
             ],
             axis=-2,
@@ -212,8 +211,7 @@ class AesGcmSiv:
             initial[..., None, 4:], (*initial.shape[:-1], blocks, BLOCK_SIZE - 4)
         )
         counter_blocks = fnp.concatenate([counter_bytes, tails], axis=-1)
-        shared = [k[..., None, :, :] for k in schedule]
-        stream = block.encrypt_with_schedule(shared, counter_blocks)
+        stream = block.encrypt_blocks(schedule, counter_blocks)
         return stream.reshape(*tag.shape[:-1], blocks * BLOCK_SIZE)[..., :length]
 
 
