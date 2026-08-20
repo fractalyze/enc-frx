@@ -23,11 +23,9 @@ class SweepTest(parameterized.TestCase):
     @parameterized.parameters(16, 24, 32)
     def test_every_published_case(self, key_size: int) -> None:
         run = 0
-        published = 0
         for vector_set in ccm_vectors.sets():
             if vector_set.key_size != key_size:
                 continue
-            published += len(vector_set.vectors)
             check_aead_published(
                 AesCcm(
                     vector_set.key_size,
@@ -37,6 +35,12 @@ class SweepTest(parameterized.TestCase):
                 vector_set.vectors,
             )
             run += len(vector_set.vectors)
+        # Counted independently of the loop above, so a filter bug that
+        # silently dropped a set would leave the two unequal rather than
+        # both shrinking in step.
+        published = sum(
+            len(s.vectors) for s in ccm_vectors.sets() if s.key_size == key_size
+        )
         self.assertGreater(run, 0, key_size)
         self.assertEqual(run, published, key_size)
 
