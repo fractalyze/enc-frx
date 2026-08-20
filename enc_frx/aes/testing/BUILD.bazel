@@ -131,3 +131,15 @@ py_test(
         requirement("absl_py"),
     ] + GPU_PLUGIN_DEPS,
 )
+
+py_test(
+    name = "polyval_test",
+    size = "small",
+    srcs = ["polyval_test.py"],
+    deps = [
+        "//enc_frx/aes:polyval",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)

@@ -59,3 +59,19 @@ py_library(
         requirement("frx"),
     ],
 )
+
+# POLYVAL (RFC 8452 §3) — GHASH's little-endian sibling, computed through the
+# Appendix A identity over the same field dtype.
+py_library(
+    name = "polyval",
+    srcs = [
+        "__init__.py",
+        "polyval.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ghash",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)
