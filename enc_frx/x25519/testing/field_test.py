@@ -36,13 +36,25 @@ _EXTREMES = (
 )
 
 
-def _element(value: int) -> np.ndarray:
-    return np.frombuffer(value.to_bytes(32, "little"), dtype=np.uint8)[None, :]
+def _elements(values: list[int]) -> np.ndarray:
+    return np.stack(
+        [
+            np.frombuffer(value.to_bytes(32, "little"), dtype=np.uint8)
+            for value in values
+        ]
+    )
 
 
-def _value(limbs: object) -> int:
-    encoded = np.asarray(field.to_bytes(limbs))[0]
-    return int.from_bytes(bytes(encoded), "little")
+def _values(limbs: object) -> list[int]:
+    encoded = np.asarray(field.to_bytes(limbs))
+    return [int.from_bytes(bytes(row), "little") for row in encoded]
+
+
+# Every ordered extreme pair, as one batch — the sweep runs as three device
+# calls instead of hundreds of single-row eager dispatches.
+_PAIRS = [(a, b) for a in _EXTREMES for b in _EXTREMES]
+_LEFT = _elements([a for (a, _) in _PAIRS])
+_RIGHT = _elements([b for (_, b) in _PAIRS])
 
 
 class FieldTest(parameterized.TestCase):
@@ -61,26 +73,18 @@ class FieldTest(parameterized.TestCase):
         self.assertEqual(field.LIMBS * field.RADIX_BITS, 256)
 
     def test_mul_matches_python_ints_on_extremes(self) -> None:
-        for a in _EXTREMES:
-            for b in _EXTREMES:
-                got = _value(
-                    field.mul(
-                        field.from_bytes(_element(a)), field.from_bytes(_element(b))
-                    )
-                )
-                self.assertEqual(got, (a * b) % _P, msg=f"a={a:#x} b={b:#x}")
+        got = _values(field.mul(field.from_bytes(_LEFT), field.from_bytes(_RIGHT)))
+        for (a, b), row in zip(_PAIRS, got, strict=True):
+            self.assertEqual(row, (a * b) % _P, msg=f"a={a:#x} b={b:#x}")
 
     def test_add_sub_match_python_ints_on_extremes(self) -> None:
-        for a in _EXTREMES:
-            for b in _EXTREMES:
-                left = field.from_bytes(_element(a))
-                right = field.from_bytes(_element(b))
-                self.assertEqual(
-                    _value(field.add(left, right)), (a + b) % _P, msg=f"{a:#x}+{b:#x}"
-                )
-                self.assertEqual(
-                    _value(field.sub(left, right)), (a - b) % _P, msg=f"{a:#x}-{b:#x}"
-                )
+        left = field.from_bytes(_LEFT)
+        right = field.from_bytes(_RIGHT)
+        added = _values(field.add(left, right))
+        subtracted = _values(field.sub(left, right))
+        for (a, b), plus, minus in zip(_PAIRS, added, subtracted, strict=True):
+            self.assertEqual(plus, (a + b) % _P, msg=f"{a:#x}+{b:#x}")
+            self.assertEqual(minus, (a - b) % _P, msg=f"{a:#x}-{b:#x}")
 
     def test_mul_matches_python_ints_on_random_batch(self) -> None:
         rng = np.random.default_rng(0)
@@ -94,16 +98,23 @@ class FieldTest(parameterized.TestCase):
             b = int.from_bytes(bytes(rhs[i]), "little")
             self.assertEqual(int.from_bytes(bytes(got[i]), "little"), (a * b) % _P)
 
-    @parameterized.parameters(*(v for v in _EXTREMES if v % _P != 0))
-    def test_invert_is_the_inverse(self, value: int) -> None:
-        element = field.from_bytes(_element(value))
-        self.assertEqual(_value(field.mul(element, field.invert(element))), 1)
+    def test_invert_is_the_inverse(self) -> None:
+        nonzero = [v for v in _EXTREMES if v % _P != 0]
+        elements = field.from_bytes(_elements(nonzero))
+        got = _values(field.mul(elements, field.invert(elements)))
+        for value, row in zip(nonzero, got, strict=True):
+            self.assertEqual(row, 1, msg=f"{value:#x}")
 
-    @parameterized.parameters(
-        (_P, 0), (_P + 1, 1), (2**255 - 1, 18), (2**256 - 1, (2**256 - 1) % _P)
-    )
-    def test_to_bytes_is_canonical(self, value: int, residue: int) -> None:
-        self.assertEqual(_value(field.from_bytes(_element(value))), residue)
+    def test_to_bytes_is_canonical(self) -> None:
+        cases = (
+            (_P, 0),
+            (_P + 1, 1),
+            (2**255 - 1, 18),
+            (2**256 - 1, (2**256 - 1) % _P),
+        )
+        got = _values(field.from_bytes(_elements([v for (v, _) in cases])))
+        for (value, residue), row in zip(cases, got, strict=True):
+            self.assertEqual(row, residue, msg=f"{value:#x}")
 
 
 if __name__ == "__main__":
