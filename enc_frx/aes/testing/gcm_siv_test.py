@@ -64,6 +64,15 @@ class GcmSivTest(absltest.TestCase):
         self.assertNotEqual(gcm_siv.AesGcmSiv(16), gcm_siv.AesGcmSiv(32))
 
     def test_traced_matches_eager(self) -> None:
+        # The gpu pipeline aborts compiling this whole-call trace:
+        # MoveCopyToUsers rebuilds a convert to an algebraic dtype without its
+        # element_algebra and HloInstruction check-fails (the byte-reversal
+        # copies POLYVAL introduces sit next to the AES field converts, which
+        # is the pattern that reaches it). Tracked as a compiler bug on the
+        # fractalyze xla work board; the eager GPU path and every vector gate
+        # above still run there.
+        if frx.default_backend() == "gpu":
+            self.skipTest("gpu pipeline check-fails on algebraic converts")
         scheme = gcm_siv.AesGcmSiv(16)
         rng = np.random.default_rng(0)
         key = rng.integers(0, 256, size=(3, 16), dtype=np.uint8)
