@@ -1,5 +1,5 @@
 load("@enc_frx_pip//:requirements.bzl", "requirement")
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
 load("//:defs.bzl", "GPU_PLUGIN_DEPS")
 
 # RFC 7748 in exact Python integers — the oracle the traced code answers to.
@@ -35,5 +35,23 @@ py_test(
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
+# The limb field against the registered curve25519 dtype, same ladder both
+# ways — the numbers the field-layout decision is held to (see the module
+# docstring for what each arm does and does not include).
+py_binary(
+    name = "ladder_bench",
+    testonly = True,
+    srcs = ["ladder_bench.py"],
+    deps = [
+        ":rfc7748_reference",
+        "//enc_frx/x25519",
+        "//enc_frx/x25519:field",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+        requirement("zk_dtypes"),
     ] + GPU_PLUGIN_DEPS,
 )
