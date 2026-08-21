@@ -33,11 +33,14 @@
 # the factory that mints a field from a runtime modulus, does not exist before
 # it. ML-KEM's q = 3329 is not one of the curated families, so the NTT has no
 # dtype to run on without it — the failure is an AttributeError at import, not a
-# wrong result. Held at 0.0.14, the release this repo has been tested against.
+# wrong result. And 0.0.15 for a third since X25519: it is the release that
+# exposes the classical-curve fields (`zk_dtypes.curve25519_bf` among them) to
+# numpy, which the x25519 ladder bench compares the limb field against. Held at
+# 0.0.16, the release this repo has been tested against.
 absl-py
 numpy
-frx==0.10.2.dev20260819130755
-frxlib==0.10.2.dev20260819130755
-frx-cuda12-pjrt==0.10.2.dev20260819130755
-frx-cuda12-plugin==0.10.2.dev20260819130755
-zk-dtypes==0.0.14
+frx==0.10.2.dev20260820235505
+frxlib==0.10.2.dev20260820235505
+frx-cuda12-pjrt==0.10.2.dev20260820235505
+frx-cuda12-plugin==0.10.2.dev20260820235505
+zk-dtypes==0.0.16
