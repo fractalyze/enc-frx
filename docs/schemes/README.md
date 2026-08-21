@@ -11,6 +11,7 @@ readable.
 | AES-GCM (NIST SP 800-38D) | [`aes-gcm.md`](aes-gcm.md) |
 | AES-GCM-SIV (RFC 8452) | [`aes-gcm-siv.md`](aes-gcm-siv.md) |
 | ML-KEM (FIPS 203) | [`ml-kem.md`](ml-kem.md) |
+| DHKEM(X25519, HKDF-SHA256) (RFC 9180 §4.1) | [`dhkem-x25519.md`](dhkem-x25519.md) |
 
 The three questions every page answers — what the standard fixes versus what this
 implementation chooses, where the batch axis is and is not, and what leaks plus

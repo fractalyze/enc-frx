@@ -12,8 +12,7 @@ from that.
 
 The functions every consumer needs are `x25519` and `public_key` (the ladder
 at the basepoint 9). DHKEM(X25519, HKDF-SHA256) — the `Kem` seam wrapper RFC
-9180 §4.1 defines over these — lives in `dhkem.py` once its HKDF dependency
-lands in the pinned hash-frx.
+9180 §4.1 defines over these — is `dhkem.py`.
 """
 
 from __future__ import annotations

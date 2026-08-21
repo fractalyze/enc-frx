@@ -240,3 +240,16 @@ http_file(
     sha256 = "8da6cdb2fb0d4e2223dfa5229ec97d4ded7b93bd8b2202e9a7533850c817b8cd",
     urls = ["https://raw.githubusercontent.com/C2SP/CCTV/" + CCTV_COMMIT + "/ML-KEM/unluckysample/ML-KEM-1024.txt"],
 )
+
+# RFC 9180's test vectors, which gate DHKEM(X25519, HKDF-SHA256). The RFC's
+# Appendix A prints these values; the JSON in the CFRG working repository is
+# the machine-readable form of the same corpus, so it is what a loader parses
+# rather than the RFC's hex dumps. Pinned to the repository's final commit —
+# the draft is published as RFC 9180 and the tree no longer moves, but a
+# branch URL would still let a force-push change what the scheme is gated on.
+http_file(
+    name = "hpke_test_vectors",
+    downloaded_file_path = "test-vectors.json",
+    sha256 = "61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6",
+    urls = ["https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-hpke/b1f7cb0cdeab6906c61b3d6574e8bdfdbe1cd3fb/test-vectors.json"],
+)
