@@ -182,8 +182,11 @@ _ACVP_IGNORED_FIELDS = frozenset(
     {"tgId", "tcId", "testType", "parameterSet", "function", "tests", "testPassed"}
 )
 
-# `keyGen` publishes no `function`; the mode names the operation instead.
-_ACVP_KEYGEN_FUNCTION = "keygen"
+# The seam's name for key generation, shared by every loader and by the driver
+# that decides which cases are keygen cases. ACVP's `keyGen` set publishes no
+# `function` at all — the mode names the operation instead — so its loader
+# supplies this as the default.
+_KEYGEN_FUNCTION = "keygen"
 
 
 def load_acvp_ml_kem(
@@ -202,7 +205,7 @@ def load_acvp_ml_kem(
     vectors: list[KemVector] = []
     for group in prompt["testGroups"]:
         parameter_set = group["parameterSet"]
-        function = group.get("function", _ACVP_KEYGEN_FUNCTION)
+        function = group.get("function", _KEYGEN_FUNCTION)
         for test in group["tests"]:
             key = (group["tgId"], test["tcId"])
             if key not in results:
@@ -256,6 +259,7 @@ _HPKE_KEM_NAMES = {0x0020: "DHKEM(X25519, HKDF-SHA256)"}
 # per-message encryptions — gates HPKE's `KeySchedule` and its AEAD use, which
 # are not the `Kem` seam's operations and wait for an HPKE composition to land.
 _HPKE_MODES = {0x00: "base", 0x01: "psk", 0x02: "auth", 0x03: "auth_psk"}
+_HPKE_AUTH_MODES = frozenset({0x02, 0x03})
 _HPKE_AUTH_FIELDS = ("ikmS", "skSm", "pkSm")
 
 
@@ -291,19 +295,21 @@ def load_hpke_kem(path: Path | str, kem_id: int) -> list[KemVector]:
             f"/kdf{suite['kdf_id']:#06x}/aead{suite['aead_id']:#06x}"
         )
 
-        for role in ("R", "E") + (("S",) if mode in (0x02, 0x03) else ()):
+        # The sender's static key pair exists only in the auth modes, and it is
+        # the same fact that makes their Encap/Decap a different operation.
+        authenticated = mode in _HPKE_AUTH_MODES
+        for role in ("R", "E", "S") if authenticated else ("R", "E"):
             vectors.append(
                 KemVector(
                     case_id=f"{case}/keygen-ikm{role}",
                     parameter_set=parameter_set,
-                    function="keygen",
+                    function=_KEYGEN_FUNCTION,
                     seed=bytes.fromhex(suite[f"ikm{role}"]),
                     encapsulation_key=bytes.fromhex(suite[f"pk{role}m"]),
                     decapsulation_key=bytes.fromhex(suite[f"sk{role}m"]),
                 )
             )
 
-        authenticated = mode in (0x02, 0x03)
         unsupported = _HPKE_AUTH_FIELDS if authenticated else ()
         vectors.append(
             KemVector(
@@ -393,9 +399,12 @@ def _reject_unsupported(vectors: Sequence[Any]) -> None:
 # The KEM driver
 # ---------------------------------------------------------------------------
 
-_KEM_SEAM_FUNCTIONS = frozenset(
-    {_ACVP_KEYGEN_FUNCTION, "encapsulation", "decapsulation"}
-)
+# The three operations the `Kem` seam names — what `check_kem` accepts, and so
+# also what a test must filter a mixed corpus down to before handing it over.
+# Public because a corpus like RFC 9180's publishes non-seam operations
+# alongside the seam's, and a test spelling the set again could filter to
+# something narrower than the driver accepts without anything failing.
+KEM_SEAM_FUNCTIONS = frozenset({_KEYGEN_FUNCTION, "encapsulation", "decapsulation"})
 
 
 def check_kem(scheme: Kem, vectors: Sequence[KemVector]) -> None:
@@ -411,7 +420,7 @@ def check_kem(scheme: Kem, vectors: Sequence[KemVector]) -> None:
     _reject_unsupported(vectors)
     _one_parameter_set(vectors)
 
-    unnamed = sorted({v.function for v in vectors} - _KEM_SEAM_FUNCTIONS)
+    unnamed = sorted({v.function for v in vectors} - KEM_SEAM_FUNCTIONS)
     if unnamed:
         raise KatError(
             f"vectors published for {unnamed}, which the Kem seam does not name — "
@@ -440,7 +449,7 @@ def check_kem(scheme: Kem, vectors: Sequence[KemVector]) -> None:
 def _check_kem_keygen(scheme: Kem, vectors: Sequence[KemVector]) -> None:
     """Keygen is deterministic in the seed and reproduces the published keys."""
     for vector in vectors:
-        if vector.seed is None or vector.function != _ACVP_KEYGEN_FUNCTION:
+        if vector.seed is None or vector.function != _KEYGEN_FUNCTION:
             continue
         encapsulation_key, decapsulation_key = scheme.keygen(_as_array(vector.seed))
         if (

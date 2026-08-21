@@ -19,20 +19,30 @@ break.
 
 from __future__ import annotations
 
+import functools
+
 import frx
 import numpy as np
 from absl.testing import absltest
 from python.runfiles import runfiles
 
 from enc_frx.kem import Kem
-from enc_frx.testing.kat import KatError, check_kem, load_hpke_kem
+from enc_frx.testing.kat import (
+    KEM_SEAM_FUNCTIONS,
+    KatError,
+    KemVector,
+    check_kem,
+    load_hpke_kem,
+)
 from enc_frx.x25519.dhkem import DhKemX25519
 
 _KEM_ID = 0x0020  # RFC 9180 §7.1, Table 2: DHKEM(X25519, HKDF-SHA256)
-_SEAM_FUNCTIONS = frozenset({"keygen", "encapsulation", "decapsulation"})
 
 
-def _vectors() -> list:
+@functools.cache
+def _vectors() -> list[KemVector]:
+    """The corpus, parsed once — it is 5.7 MB of JSON and every case in it is
+    read-only here."""
     location = runfiles.Create().Rlocation("hpke_test_vectors/file/test-vectors.json")
     assert location is not None, "hpke_test_vectors not in runfiles"
     return load_hpke_kem(location, kem_id=_KEM_ID)
@@ -40,7 +50,7 @@ def _vectors() -> list:
 
 class DhKemRfc9180Test(absltest.TestCase):
     def test_rfc9180_vectors(self) -> None:
-        vectors = [v for v in _vectors() if v.function in _SEAM_FUNCTIONS]
+        vectors = [v for v in _vectors() if v.function in KEM_SEAM_FUNCTIONS]
         # Both base modes, both published kdf/aead spreads: the corpus carries
         # enough cases that an empty filter result would be a loader bug.
         self.assertGreaterEqual(
