@@ -179,42 +179,40 @@ def _constant(value: int, dtype: np.dtype, batch: tuple[int, ...]) -> Array:
     return fnp.broadcast_to(fnp.asarray(np.array([[value]], dtype=dtype)), (*batch, 1))
 
 
-def _bf_x25519(scalar: Array, u: Array) -> Array:
-    """X25519 over `curve25519_bf`: canonical storage, so the RFC bytes enter
-    and leave as views and the whole computation is one trace."""
+def _dtype_x25519(scalar: Array, u: Array, dtype: np.dtype) -> Array:
+    """X25519 over a field dtype, bytes in and bytes out. The bytes always
+    cross as a `view(_BF)` — canonical storage IS the RFC encoding — so a
+    non-`_BF` working dtype is reached by the variant convert on each side,
+    and the ladder in between is the same either way. One body rather than
+    one per arm, because "every arm runs the identical ladder" is the
+    premise the whole comparison rests on."""
     batch = scalar.shape[:-1]
     bits = x25519._scalar_bits(x25519._clamp(scalar))
     x1 = fnp.concatenate([u[..., :31], u[..., 31:] & np.uint8(127)], axis=-1).view(_BF)
+    if dtype != _BF:
+        x1 = x1.astype(dtype)
     result = _dtype_ladder(
         bits,
         x1,
-        _constant(121665, _BF, batch),
-        _constant(1, _BF, batch),
-        _constant(0, _BF, batch),
+        _constant(121665, dtype, batch),
+        _constant(1, dtype, batch),
+        _constant(0, dtype, batch),
     )
+    if dtype != _BF:
+        result = result.astype(_BF)
     return result.view(fnp.uint8)
 
 
+def _bf_x25519(scalar: Array, u: Array) -> Array:
+    """The bf arm: canonical storage throughout, so the byte boundary is two
+    free views and the whole computation is one trace."""
+    return _dtype_x25519(scalar, u, _BF)
+
+
 def _mont_wire_x25519(scalar: Array, u: Array) -> Array:
-    """X25519 over `curve25519_bf_mont` with the wire boundary in the trace:
-    bytes cross as `view(bf)`, the variant convert moves them into Montgomery
-    storage, and the result converts back before leaving as bytes. The
-    deployable form of the mont arm — what a `field.py` swap would ship."""
-    batch = scalar.shape[:-1]
-    bits = x25519._scalar_bits(x25519._clamp(scalar))
-    x1 = (
-        fnp.concatenate([u[..., :31], u[..., 31:] & np.uint8(127)], axis=-1)
-        .view(_BF)
-        .astype(_MONT)
-    )
-    result = _dtype_ladder(
-        bits,
-        x1,
-        _constant(121665, _MONT, batch),
-        _constant(1, _MONT, batch),
-        _constant(0, _MONT, batch),
-    )
-    return result.astype(_BF).view(fnp.uint8)
+    """The mont arm with the wire boundary in the trace — the deployable form,
+    what a `field.py` swap would ship."""
+    return _dtype_x25519(scalar, u, _MONT)
 
 
 def _mont_material(
@@ -360,17 +358,18 @@ def _sweep(batches: list[int], wire_available: bool) -> None:
         last = {"limb": limb, "bf": bf, "mont": mont}
         if wire is not None:
             last["wire"] = wire
-        ratios = f"{bf[1] / limb[1]:>7.2f}x  {mont[1] / limb[1]:>8.2f}x"
-        if wire is not None:
-            tail = (
-                f"{wire[1] * 1e3:>8.2f}ms  {ratios}  "
-                f"{wire[1] / limb[1]:>8.2f}x  {wire[1] / batch * 1e6:>7.1f}us"
-            )
-        else:
-            tail = f"{'--':>10}  {ratios}  {'--':>9}  {'--':>9}"
+        # The three wire cells are the only optional ones; spelling them
+        # individually keeps the row in header order rather than splicing two
+        # whole-row variants together.
+        wire_ms = f"{wire[1] * 1e3:>8.2f}ms" if wire is not None else f"{'--':>10}"
+        wire_ratio = f"{wire[1] / limb[1]:>8.2f}x" if wire is not None else f"{'--':>9}"
+        wire_op = (
+            f"{wire[1] / batch * 1e6:>7.1f}us" if wire is not None else f"{'--':>9}"
+        )
         _say(
             f"  {batch:>6}  {limb[1] * 1e3:>8.2f}ms  {bf[1] * 1e3:>8.2f}ms  "
-            f"{mont[1] * 1e3:>8.2f}ms  {tail}"
+            f"{mont[1] * 1e3:>8.2f}ms  {wire_ms}  {bf[1] / limb[1]:>7.2f}x  "
+            f"{mont[1] / limb[1]:>8.2f}x  {wire_ratio}  {wire_op}"
         )
     if last:
         _say(
