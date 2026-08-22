@@ -23,46 +23,38 @@ between them is its own question:
   boundary every other arm includes — the kernel ceiling, not a deployable
   path.
 - **dtype mont wire** — the deployable form of the mont arm: RFC bytes cross
-  as `view(bf)`, the variant convert (`astype`, lowering since xla#568 /
-  frx 0.10.2.dev20260821123830) moves them into Montgomery storage inside the
-  trace, and the result crosses back the same way. This is the arm a
-  `field.py` swap would actually ship, so it is the one the decision reads.
-  On the CUDA leg the convert lowers standalone but does not survive feeding
-  the ladder's `fori_loop` (`EmitElementwise: unsupported field op convert`,
-  measured on that exact pin), so there the bench degrades to three arms
-  rather than aborting, and this arm prices the CPU leg only.
+  as `view(bf)`, the variant convert (`astype`) moves them into Montgomery
+  storage inside the trace, and the result crosses back the same way. This is
+  the arm a `field.py` swap would actually ship, so it is the one the decision
+  reads. It builds on both legs; on wheels before
+  frx 0.10.2.dev20260822060712 the CUDA leg could not compile it, so the bench
+  drops this arm rather than aborting when the convert refuses to lower.
 
 Every arm is verified against the RFC 7748 §5.2 vectors and against `field`'s
 own output before its first timed row; a fast arm that computes the wrong
 function has no row to show.
 
-## What it measured, and the decision it held
+## Where the decision stands
 
-First run (frx 0.10.2.dev20260820235505, zk_dtypes 0.0.16, RTX 5090): the
-mont arm is uniformly 12-25x faster than the limb field on GPU (B >= 32) and
-17-72x on CPU — a single multiply over 2^16 elements is 292 Mmul/s against
-the limb field's 1.7 on CPU, the scalarization gap in one number. The bf arm
-wins on GPU at every batch size past 1 (2.5x at B=256-1024) but *loses* on
-CPU at mid-batch (2.8x slower at B=1024, flat ~2.4ms/op where the limb field
-amortizes), so the deployable arm does not clear "faster on both legs" and
-the limb field stays. The swap reopens when the variant convert lowers —
-that unlocks the mont arm's margin with the bf arm's free byte boundary.
+**Speed says swap; correctness says not yet, so `field.py` stays.**
 
-The mont-wire arm is that reopening, measured.
+On the current pin every arm builds on both legs and the deployable wire arm
+beats the limb field by 5.6-27x on CUDA and 17-58x on CPU, tracking the
+host-entered mont ceiling to within ~2% — so the traced byte boundary is free
+and "faster on both legs" passes at every batch size. The bf arm is not the
+candidate: it loses to the limb field on CPU at mid batch.
 
-Second run (frx 0.10.2.dev20260821123830 — the first wheel where the variant
-convert lowers — zk_dtypes 0.0.16, RTX 5090): **the limb field stays, but the
-blocker moved.** On CPU the wire arm is the mont ceiling with the boundary
-priced in — within noise of the host-entered mont rows (52.6ms vs 51.1ms at
-B=1024), 16-64x faster than the limb field across the sweep — so the leg that
-vetoed the bf swap now favors the dtype by more than an order of magnitude.
-On CUDA the convert lowers standalone and through elementwise neighbors, but
-feeding its result into the ladder's `fori_loop` hits `EmitElementwise:
-unsupported field op convert` at compile time, so the deployable arm does not
-exist there yet (the host-entered mont ceiling measured 26x over the limb
-field at B=256). "Faster on both legs" fails on availability, not price. The
-swap reopens when that emitter gap closes; on these numbers it would be
-decisive on both legs.
+What blocks it: **`curve25519_bf_mont` multiply is wrong for roughly 1 operand
+pair in 200,000, always low by exactly 1** (fractalyze/xla#542, which carries a
+standalone reproducer). Identical on CPU and CUDA, so it is the field kernel,
+not an emitter; `curve25519_bf` computes the same products correctly. A ladder
+is ~2800 multiplies, so ~1.4% of X25519 calls would return a wrong shared
+secret. Fixed vectors cannot see that — the eight this bench checks all pass —
+which is why the retire is gated on RFC 7748 §5.2's *iterated* vector, where a
+dtype ladder diverges at iteration 82.
+
+Earlier runs, and the emitter gap that used to block the CUDA arm
+(fractalyze/xla#573), are in this file's history.
 
 Run:
     bazel run //enc_frx/x25519/testing:ladder_bench
