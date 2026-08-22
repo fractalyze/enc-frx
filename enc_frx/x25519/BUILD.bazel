@@ -30,3 +30,23 @@ py_library(
         requirement("numpy"),
     ],
 )
+
+# DHKEM(X25519, HKDF-SHA256) — RFC 9180 §4.1 over the Kem seam. HKDF and HMAC
+# come from hash-frx; only the HPKE labeling lives here.
+py_library(
+    name = "dhkem",
+    srcs = [
+        "__init__.py",
+        "dhkem.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":x25519",
+        "//enc_frx:kem",
+        "@hash_frx//hash_frx:hkdf",
+        "@hash_frx//hash_frx:hmac",
+        "@hash_frx//hash_frx:sha256",
+        requirement("frx"),
+        requirement("numpy"),
+    ],
+)

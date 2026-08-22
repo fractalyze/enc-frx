@@ -25,6 +25,24 @@ py_test(
     ] + GPU_PLUGIN_DEPS,
 )
 
+# DHKEM against RFC 9180's published corpus, fetched and sha256-pinned in
+# //MODULE.bazel rather than committed.
+py_test(
+    name = "dhkem_test",
+    size = "large",
+    srcs = ["dhkem_test.py"],
+    data = ["@hpke_test_vectors//file"],
+    deps = [
+        "//enc_frx:kem",
+        "//enc_frx/testing:kat",
+        "//enc_frx/x25519:dhkem",
+        "@rules_python//python/runfiles",
+        requirement("absl_py"),
+        requirement("frx"),
+        requirement("numpy"),
+    ] + GPU_PLUGIN_DEPS,
+)
+
 py_test(
     name = "x25519_test",
     size = "large",

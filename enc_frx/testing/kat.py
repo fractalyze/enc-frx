@@ -182,8 +182,11 @@ _ACVP_IGNORED_FIELDS = frozenset(
     {"tgId", "tcId", "testType", "parameterSet", "function", "tests", "testPassed"}
 )
 
-# `keyGen` publishes no `function`; the mode names the operation instead.
-_ACVP_KEYGEN_FUNCTION = "keygen"
+# The seam's name for key generation, shared by every loader and by the driver
+# that decides which cases are keygen cases. ACVP's `keyGen` set publishes no
+# `function` at all — the mode names the operation instead — so its loader
+# supplies this as the default.
+_KEYGEN_FUNCTION = "keygen"
 
 
 def load_acvp_ml_kem(
@@ -202,7 +205,7 @@ def load_acvp_ml_kem(
     vectors: list[KemVector] = []
     for group in prompt["testGroups"]:
         parameter_set = group["parameterSet"]
-        function = group.get("function", _ACVP_KEYGEN_FUNCTION)
+        function = group.get("function", _KEYGEN_FUNCTION)
         for test in group["tests"]:
             key = (group["tgId"], test["tcId"])
             if key not in results:
@@ -244,6 +247,93 @@ def load_acvp_ml_kem(
                     **fields,
                 )
             )
+    return vectors
+
+
+# RFC 9180's KEM names by `kem_id` (§7.1, Table 2) — the loader's parameter-set
+# label, and the guard against pointing it at a KEM this repo does not spell.
+_HPKE_KEM_NAMES = {0x0020: "DHKEM(X25519, HKDF-SHA256)"}
+
+# One suite's KEM-step fields, per role. Everything else a suite publishes —
+# `key`, `base_nonce`, `exporter_secret`, the key-schedule intermediates and the
+# per-message encryptions — gates HPKE's `KeySchedule` and its AEAD use, which
+# are not the `Kem` seam's operations and wait for an HPKE composition to land.
+_HPKE_MODES = {0x00: "base", 0x01: "psk", 0x02: "auth", 0x03: "auth_psk"}
+_HPKE_AUTH_MODES = frozenset({0x02, 0x03})
+_HPKE_AUTH_FIELDS = ("ikmS", "skSm", "pkSm")
+
+
+def load_hpke_kem(path: Path | str, kem_id: int) -> list[KemVector]:
+    """Normalize RFC 9180's published vectors into one KEM's seam cases.
+
+    Every suite in the file carries its KEM step by ikm: `DeriveKeyPair(ikmR)`
+    and `DeriveKeyPair(ikmE)` are keygen cases whatever the mode, because §7.1.3
+    derives a key pair the same way for every role. The base `Encap`/`Decap`
+    cases come from the base and psk modes only — a PSK enters the key schedule
+    and never the KEM step, so those two modes publish the same operation. The
+    auth modes run `AuthEncap`/`AuthDecap` (§4.1), a different transform whose
+    sender key the record cannot express — their cases are recorded with the
+    sender fields in `unsupported` rather than dropped, so a driver refuses them
+    instead of silently running the wrong operation over their inputs.
+    """
+    if kem_id not in _HPKE_KEM_NAMES:
+        raise KatError(
+            f"kem_id {kem_id:#06x} is not one this loader names; known: "
+            f"{sorted(_HPKE_KEM_NAMES)}"
+        )
+    parameter_set = _HPKE_KEM_NAMES[kem_id]
+
+    vectors: list[KemVector] = []
+    for suite in json.loads(Path(path).read_text()):
+        if suite["kem_id"] != kem_id:
+            continue
+        mode = suite["mode"]
+        if mode not in _HPKE_MODES:
+            raise KatError(f"mode {mode:#04x} is not one RFC 9180 §5 names")
+        case = (
+            f"{parameter_set}/{_HPKE_MODES[mode]}"
+            f"/kdf{suite['kdf_id']:#06x}/aead{suite['aead_id']:#06x}"
+        )
+
+        # The sender's static key pair exists only in the auth modes, and it is
+        # the same fact that makes their Encap/Decap a different operation.
+        authenticated = mode in _HPKE_AUTH_MODES
+        for role in ("R", "E", "S") if authenticated else ("R", "E"):
+            vectors.append(
+                KemVector(
+                    case_id=f"{case}/keygen-ikm{role}",
+                    parameter_set=parameter_set,
+                    function=_KEYGEN_FUNCTION,
+                    seed=bytes.fromhex(suite[f"ikm{role}"]),
+                    encapsulation_key=bytes.fromhex(suite[f"pk{role}m"]),
+                    decapsulation_key=bytes.fromhex(suite[f"sk{role}m"]),
+                )
+            )
+
+        unsupported = _HPKE_AUTH_FIELDS if authenticated else ()
+        vectors.append(
+            KemVector(
+                case_id=f"{case}/encap",
+                parameter_set=parameter_set,
+                function="authEncap" if authenticated else "encapsulation",
+                encapsulation_key=bytes.fromhex(suite["pkRm"]),
+                randomness=bytes.fromhex(suite["ikmE"]),
+                ciphertext=bytes.fromhex(suite["enc"]),
+                shared_secret=bytes.fromhex(suite["shared_secret"]),
+                unsupported=unsupported,
+            )
+        )
+        vectors.append(
+            KemVector(
+                case_id=f"{case}/decap",
+                parameter_set=parameter_set,
+                function="authDecap" if authenticated else "decapsulation",
+                decapsulation_key=bytes.fromhex(suite["skRm"]),
+                ciphertext=bytes.fromhex(suite["enc"]),
+                shared_secret=bytes.fromhex(suite["shared_secret"]),
+                unsupported=unsupported,
+            )
+        )
     return vectors
 
 
@@ -309,9 +399,12 @@ def _reject_unsupported(vectors: Sequence[Any]) -> None:
 # The KEM driver
 # ---------------------------------------------------------------------------
 
-_KEM_SEAM_FUNCTIONS = frozenset(
-    {_ACVP_KEYGEN_FUNCTION, "encapsulation", "decapsulation"}
-)
+# The three operations the `Kem` seam names — what `check_kem` accepts, and so
+# also what a test must filter a mixed corpus down to before handing it over.
+# Public because a corpus like RFC 9180's publishes non-seam operations
+# alongside the seam's, and a test spelling the set again could filter to
+# something narrower than the driver accepts without anything failing.
+KEM_SEAM_FUNCTIONS = frozenset({_KEYGEN_FUNCTION, "encapsulation", "decapsulation"})
 
 
 def check_kem(scheme: Kem, vectors: Sequence[KemVector]) -> None:
@@ -327,7 +420,7 @@ def check_kem(scheme: Kem, vectors: Sequence[KemVector]) -> None:
     _reject_unsupported(vectors)
     _one_parameter_set(vectors)
 
-    unnamed = sorted({v.function for v in vectors} - _KEM_SEAM_FUNCTIONS)
+    unnamed = sorted({v.function for v in vectors} - KEM_SEAM_FUNCTIONS)
     if unnamed:
         raise KatError(
             f"vectors published for {unnamed}, which the Kem seam does not name — "
@@ -356,7 +449,7 @@ def check_kem(scheme: Kem, vectors: Sequence[KemVector]) -> None:
 def _check_kem_keygen(scheme: Kem, vectors: Sequence[KemVector]) -> None:
     """Keygen is deterministic in the seed and reproduces the published keys."""
     for vector in vectors:
-        if vector.seed is None or vector.function != _ACVP_KEYGEN_FUNCTION:
+        if vector.seed is None or vector.function != _KEYGEN_FUNCTION:
             continue
         encapsulation_key, decapsulation_key = scheme.keygen(_as_array(vector.seed))
         if (
