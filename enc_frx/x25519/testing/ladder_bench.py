@@ -64,6 +64,28 @@ field at B=256). "Faster on both legs" fails on availability, not price. The
 swap reopens when that emitter gap closes; on these numbers it would be
 decisive on both legs.
 
+Third run (frx 0.10.2.dev20260822060712 — the first wheel carrying
+fractalyze/xla#573, which closed that emitter gap): **the speed case is
+settled and the swap is still blocked, now on correctness.** All four arms
+build on both legs; the wire arm beats the limb field 5.6-27x on CUDA and
+17-58x on CPU and tracks the host-entered mont ceiling to within ~2%, so the
+traced byte boundary is free and "faster on both legs" passes everywhere. The
+bf arm stays the loser it was (2.84x slower than the limb field on CPU at
+B=1024), so mont-plus-boundary is the only candidate.
+
+What stops it: **`curve25519_bf_mont` multiply is wrong for roughly 1 operand
+pair in 200,000, always by exactly -1.** Measured identically on CPU and CUDA,
+so it is the field kernel and not an emitter. `curve25519_bf` (plain storage)
+computes the same products correctly. A ladder is ~2800 multiplies, so about
+1.4% of X25519 calls return a wrong shared secret — which is why the eight
+vectors this bench verifies never caught it, and why RFC 7748 §5.2's iterated
+test does: a dtype ladder diverges from the reference at iteration 82.
+
+Filed on fractalyze/xla#542, with a reproducer that needs none of this module
+— two operands and a square. That issue's table currently records curve25519 p
+as correct; it is correct only for the small and random operands the issue
+sampled. Until it lands, `field.py` stays: it is slow and it is right.
+
 Run:
     bazel run //enc_frx/x25519/testing:ladder_bench
     bazel run //enc_frx/x25519/testing:ladder_bench -- --batches=1,256,8192
