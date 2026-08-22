@@ -1,22 +1,8 @@
 load("@enc_frx_pip//:requirements.bzl", "requirement")
 load("@rules_python//python:defs.bzl", "py_library")
 
-# GF(2^255 - 19) on uint32 lanes — 16-bit limbs with half-product
-# accumulation, the no-64-bit-lane layout (cf. chacha/poly1305.py).
-py_library(
-    name = "field",
-    srcs = [
-        "__init__.py",
-        "field.py",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        requirement("frx"),
-        requirement("numpy"),
-    ],
-)
-
-# X25519 (RFC 7748 §5): clamp, Montgomery ladder, public-key derivation.
+# X25519 (RFC 7748 §5): clamp, Montgomery ladder, public-key derivation, over
+# the registered curve25519 field dtype.
 py_library(
     name = "x25519",
     srcs = [
@@ -25,9 +11,9 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":field",
         requirement("frx"),
         requirement("numpy"),
+        requirement("zk_dtypes"),
     ],
 )
 

@@ -34,9 +34,10 @@
 # it. ML-KEM's q = 3329 is not one of the curated families, so the NTT has no
 # dtype to run on without it — the failure is an AttributeError at import, not a
 # wrong result. And 0.0.15 for a third since X25519: it is the release that
-# exposes the classical-curve fields (`zk_dtypes.curve25519_bf` among them) to
-# numpy, which the x25519 ladder bench compares the limb field against. Held at
-# 0.0.16, the release this repo has been tested against.
+# exposes the classical-curve fields to numpy, `zk_dtypes.curve25519_bf` and its
+# Montgomery variant among them — which is not a bench convenience but the field
+# the X25519 ladder runs on, so below this floor `x25519.py` does not import.
+# Held at 0.0.16, the release this repo has been tested against.
 absl-py
 numpy
 frx==0.10.2.dev20260823002126
