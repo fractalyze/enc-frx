@@ -18,27 +18,65 @@ only difference is where the field material comes from:
   add the RFC's appended `1`) and the conversion into the field.
 
 **`wire / mont` is the number this bench exists for, and unlike the x25519
-ladder's it is not 1.0** — the plumbing is a real fraction of the work here:
+ladder's it is not 1.0** — the plumbing is a real fraction of the work here.
+The whole default sweep, on frx 0.10.2.dev20260823002126, RTX 5090 +
+Ryzen 9 9950X, median of six passes on an otherwise idle box:
 
 ```
-   B    bytes    CPU     CUDA
- 256     1024   1.95     1.12
- 256    16384   1.61     1.00
+                CUDA                        CPU
+   B    bytes   mont     wire   ratio     mont     wire   ratio
+   1       64   0.05ms   0.08ms  1.50     0.01ms   0.02ms  1.77
+   1     1024   0.22ms   0.24ms  1.09     0.01ms   0.04ms  4.15
+   1    16384   2.89ms   2.91ms  1.01     0.04ms   0.10ms  2.29
+ 256       64   0.05ms   0.08ms  1.68     0.03ms   0.11ms  4.62
+ 256     1024   0.21ms   0.25ms  1.17     0.21ms   0.42ms  1.99
+ 256    16384   2.92ms   2.98ms  1.03     3.25ms   5.19ms  1.60
 ```
 
-That is worth knowing rather than hiding. A 16 KiB message is 1024 blocks, and
-framing them means materialising 1024 x 17 bytes and then 1024 x 32; on CPU
-that is 40% of the call, against a scan that is already fast. CUDA absorbs it
-at length (1.02 at 16 KiB) and pays it at 1 KiB, where the framing does not
-have enough work to hide behind. So the ratio reads as a standing question —
-how much of Poly1305 is byte plumbing — rather than as an invariant to hold at
-1.0, and a pin bump that changed the fusion story would move it either way.
+**Three cells in this table are stable enough to compare against a later run**,
+and all three are the 16 KiB rows: CUDA holds 0.97-1.01 at B = 1 and 1.00-1.06
+at B = 256, CPU 1.58-1.64 at B = 256. Everything else moves, and the shorter
+the call the more it moves:
+
+```
+                    ratio, min-max over six passes
+   B    bytes     CUDA          CPU
+   1       64   1.10-1.85     1.19-3.85
+   1     1024   1.04-1.14     2.38-5.55
+   1    16384   0.97-1.01     1.83-3.73
+ 256       64   1.52-1.79     2.69-5.74
+ 256     1024   1.10-1.22     1.78-2.20
+ 256    16384   1.00-1.06     1.58-1.64
+```
+
+The reason is arithmetic, not fusion: on CPU a B = 1 call is 0.01-0.10ms
+against the ~0.005ms dispatch floor `ladder_bench` reports on this box, and the
+`mont` column there is at the printing resolution — a 0.01ms cell is anything
+from 0.005 to 0.014, so the ratio it forms is worth a factor of three on its
+own. **A pin bump is a regression here only if it moves a 16 KiB row.** Nothing
+at B = 1 on the CPU leg, and nothing at 64 bytes on either leg, should be read
+as a figure.
+
+Idleness is part of the measurement, not a nicety. A seventh pass taken while
+another job held the box read 2.10 in the CPU 16 KiB cell, against 1.58-1.64
+idle — further than any idle pass moved. Run it on a quiet machine or do not
+run it.
+
+What the sweep does establish is the shape, and wherever the numbers mean
+anything — both CUDA rows, and CPU at B = 256 — the ratio falls monotonically
+with message length. A 16 KiB message is 1024 blocks, and framing them means
+materialising 1024 x 17 bytes and then 1024 x 32; that fixed plumbing is most
+of a short call and a shrinking fraction of a long one. On CPU it is still 37%
+of the call at 16 KiB, against a scan that is already fast, and the wire arm
+gets 0.80 GB/s there against CUDA's 1.41. CUDA absorbs the framing at length
+(1.03 at 16 KiB) and pays it at 64 bytes, where it does not have enough work
+to hide behind. So the ratio reads as a standing question — how much of
+Poly1305 is byte plumbing — rather than as an invariant to hold at 1.0, and a
+pin bump that changed the fusion story would move it either way.
 
 Nothing runs it automatically: it is a `py_binary`, and CI builds it without
-executing it.
-
-The `wire / mont` table above was taken on frx 0.10.2.dev20260823002126, the
-pin this branch runs on.
+executing it — so the table above is only as fresh as the last person to run
+it, and it re-measures every run.
 
 ## Why the limb field is gone
 
