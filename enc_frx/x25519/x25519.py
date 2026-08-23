@@ -87,30 +87,17 @@ def _cswap(swap: Array, left: Array, right: Array) -> tuple[Array, Array]:
     return fnp.where(swap, right, left), fnp.where(swap, left, right)
 
 
-def _constant(value: int, dtype: np.dtype, batch: tuple[int, ...]) -> Array:
-    """A field constant broadcast over the batch. Field elements carry a
-    trailing unit axis — the shape `[..., 32]` bytes view as.
-
-    The source is rank 1, not rank 2: `keygen` is unbatched per the seam rule,
-    so `batch` is `()` there and the target shape is `(1,)`, which a `(1, 1)`
-    source cannot broadcast to.
-    """
-    return fnp.broadcast_to(fnp.asarray(np.array([value], dtype=dtype)), (*batch, 1))
-
-
 def _ladder_step(index: Array, carry: tuple[Array, ...]) -> tuple[Array, ...]:
-    """One RFC 7748 §5 ladder iteration. The loop-invariants (`bits`, `x1`,
+    """One RFC 7748 §5 ladder iteration. The loop-invariants (`cond`, `x1`,
     `a24`) ride the carry — where they cost nothing — instead of being closed
     over, because frx keys the loop-body lowering cache on the body function's
     identity (the gotcha `aes/ghash._absorb` measured): a closure minted per
     `x25519` call would re-trace this ~10-multiply body every call.
     """
-    x2, z2, x3, z3, swap, bits, x1, a24 = carry
-    bit = frx.lax.dynamic_slice_in_dim(bits, 254 - index, 1, axis=-1)
-    swap = swap ^ bit
+    x2, z2, x3, z3, cond, x1, a24 = carry
+    swap = frx.lax.dynamic_slice_in_dim(cond, 254 - index, 1, axis=-1)
     x2, x3 = _cswap(swap, x2, x3)
     z2, z3 = _cswap(swap, z2, z3)
-    swap = bit
 
     a = x2 + z2
     aa = a * a
@@ -127,7 +114,23 @@ def _ladder_step(index: Array, carry: tuple[Array, ...]) -> tuple[Array, ...]:
     z3 = x1 * (s * s)
     x2 = aa * bb
     z2 = e * (aa + a24 * e)
-    return (x2, z2, x3, z3, swap, bits, x1, a24)
+    return (x2, z2, x3, z3, cond, x1, a24)
+
+
+def _swap_conditions(bits: Array) -> Array:
+    """The RFC's running `swap ^= k_t`, solved in closed form.
+
+    §5's ladder carries a `swap` bit and XORs each scalar bit into it, so the
+    condition at step `t` is `k_t ^ k_{t+1}` (with `k_255 = 0`) — a function of
+    the scalar alone. Computing it here rather than in the body is not just
+    tidier: keeping the XOR inside makes the sliced bit a *loop output*, which
+    XLA cannot fuse into the body and so emits as its own kernel per iteration.
+    Hoisting it takes the GPU body from 5 kernels an iteration to 2 on the
+    unbatched shape: 4.17ms -> 1.73ms at B = 1, 2.33ms -> 1.84ms at B = 8192.
+    CPU is unaffected — the cost is a fusion boundary, not arithmetic.
+    """
+    tail = fnp.zeros((*bits.shape[:-1], 1), dtype=bool)
+    return bits ^ fnp.concatenate([bits[..., 1:], tail], axis=-1)
 
 
 def _ladder(bits: Array, x1: Array) -> Array:
@@ -138,22 +141,24 @@ def _ladder(bits: Array, x1: Array) -> Array:
     drive the ladder without the byte boundary around it — which is what lets
     `testing/ladder_bench.py` measure that boundary rather than
     re-implementing the body to compare against. Everything else the ladder
-    needs is a curve constant, taken from `x1`'s dtype and batch rather than
+    needs is a curve constant, taken from `x1`'s dtype and shape rather than
     passed, so there is one correct way to build them and it lives here.
     """
-    batch = x1.shape[:-1]
-    zero = _constant(0, x1.dtype, batch)
-    one = _constant(1, x1.dtype, batch)
-    a24 = _constant(_A24, x1.dtype, batch)
+    zero = fnp.zeros(x1.shape, dtype=x1.dtype)
+    one = fnp.ones(x1.shape, dtype=x1.dtype)
+    # a24 is read, never written, so it stays one element rather than riding
+    # the loop carry at full batch width — worth 2-4% on CUDA.
+    a24 = fnp.full((1,), _A24, dtype=x1.dtype)
 
     x2, z2 = one, zero
     x3, z3 = x1, one
-    swap = fnp.zeros((*batch, 1), dtype=bool)
-    x2, z2, x3, z3, swap, _, _, _ = frx.lax.fori_loop(
-        0, 255, _ladder_step, (x2, z2, x3, z3, swap, bits, x1, a24)
+    x2, z2, x3, z3, _, _, _ = frx.lax.fori_loop(
+        0, 255, _ladder_step, (x2, z2, x3, z3, _swap_conditions(bits), x1, a24)
     )
-    x2, _ = _cswap(swap, x2, x3)
-    z2, _ = _cswap(swap, z2, z3)
+    # The loop leaves `swap` equal to the scalar's low bit, so that is the
+    # condition for the final exchange.
+    x2, _ = _cswap(bits[..., 0:1], x2, x3)
+    z2, _ = _cswap(bits[..., 0:1], z2, z3)
     # Field division, not a hand-rolled p-2 addition chain: the dtype carries
     # its own inversion, and it is ~4x faster than the 254 squarings were.
     return x2 / z2

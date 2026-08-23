@@ -27,26 +27,32 @@ when someone runs it.
 
 ## What it measures now
 
-frx 0.10.2.dev20260822150923, RTX 5090 + Ryzen 9 9950X:
+frx 0.10.2.dev20260823002126, RTX 5090 + Ryzen 9 9950X:
 
 ```
             CUDA                        CPU
    B   mont     wire   ratio     mont     wire   ratio
-   1   3.81ms   3.82ms  1.00     0.08ms   0.11ms  1.34
-  32   2.73ms   2.76ms  1.01     1.76ms   1.77ms  1.01
- 256   2.14ms   2.15ms  1.00    13.27ms  13.58ms  1.02
-1024   2.16ms   2.17ms  1.01    53.44ms  53.76ms  1.01
-8192   2.18ms   2.22ms  1.02   128.62ms 128.47ms  1.00
+   1   1.72ms   1.73ms  1.01     0.09ms   0.10ms  1.16
+  32   1.71ms   1.73ms  1.01     1.79ms   1.76ms  0.98
+ 256   1.78ms   1.79ms  1.01    13.53ms  14.38ms  1.06
+1024   1.78ms   1.80ms  1.01    53.53ms  53.85ms  1.01
+8192   1.82ms   1.84ms  1.01   136.91ms 137.60ms  1.01
 ```
 
 The ratio is 1.0 on both legs across the sweep — the boundary is free, which
-is the whole claim. CUDA is flat from B = 256 (0.3us/op at 8192, dispatch
-floor 0.032ms); CPU saturates around 53us/op and stops improving past B = 32.
+is the whole claim. CUDA is flat from B = 1 (0.2us/op at 8192, dispatch floor
+0.030ms); CPU saturates around 53us/op and stops improving past B = 32.
 
 Read the ratio, not the millisecond: CPU rows move several percent run to run,
-and the B = 1 row is the arms' asymmetry rather than the boundary — 0.02ms of
+and the B = 1 row is the arms' asymmetry rather than the boundary — the
 scalar-bit expansion is most of a 0.09ms ladder there, and nothing at that
 batch size is dispatch-bound enough to hide it.
+
+CUDA being flat from B = 1 is new, and it is what hoisting the RFC's running
+`swap ^= k_t` out of the loop bought (`x25519._swap_conditions`): the XOR made
+the sliced bit a loop output, which XLA emits as its own kernel per iteration
+rather than fusing. The unbatched row went 4.17ms -> 1.73ms and B = 8192 went
+2.33ms -> 1.84ms. CPU is unaffected, the cost being a GPU fusion boundary.
 
 ## Why the limb field is gone
 
@@ -117,14 +123,13 @@ _FLOOR_WARMUP_S = 0.5
 def _mont_material(scalar: np.ndarray, u: np.ndarray) -> tuple[Array, Array]:
     """`x25519._ladder`'s arguments, built on the host — the ceiling arm's
     inputs, with the byte boundary done in numpy instead of in the trace."""
-    batch = scalar.shape[:-1]
     bits = x25519._scalar_bits(x25519._clamp(fnp.asarray(scalar)))
     masked = u.copy()
     masked[..., 31] &= 0x7F
     x1 = np.array(
-        [[int.from_bytes(bytes(row), "little")] for row in masked.reshape(-1, 32)],
+        [[int.from_bytes(bytes(row), "little")] for row in masked],
         dtype=x25519.WORK,
-    ).reshape(*batch, 1)
+    )
     return bits, fnp.asarray(x1)
 
 
@@ -235,7 +240,12 @@ def _sweep(batches: list[int]) -> None:
 
 def _single_multiply(count: int) -> None:
     """One field multiply over `count` elements, per storage form — the
-    operation the ladder rows are made of, without the ladder around it."""
+    operation the ladder rows are made of, without the ladder around it.
+
+    The `bf` row earns its place by being the only thing that measures
+    `x25519.py`'s claim that Montgomery storage is where the fast multiply
+    lives. No arm of the sweep runs `bf`; the ladder only ever sees `WORK`.
+    """
     rng = np.random.default_rng(3)
     values = [
         int.from_bytes(bytes(row), "little") % _P
