@@ -215,13 +215,14 @@ slower of the two legs rather than their average, and don't assume which leg
 that is — the GPU one for most targets here, the CPU one for x25519's ladder.
 Half is the line because the idle-to-loaded spread on a single leg is about
 that: `xchacha20_poly1305_test` measured 37.1s on an idle GPU runner and 46.4s
-on a loaded one, against a 60s cap.
+on a loaded one, against a 60s cap. Both figures predate the poly1305 field
+change that cut that target to 14s — the spread is the point, not the target.
 
 Baseline against the CI legs and not a workstation, which runs these two to
 three times faster. Bazel's own `Consider setting size="small"` warning is
 measured against whichever box just ran the test, so locally it fires for every
-chacha target — including the one that takes 70s on the GPU runner. The warning
-is about that machine; the size is not.
+chacha target — including, when that was written, the one taking 70s on the GPU
+runner. The warning is about that machine; the size is not.
 
 What this prevents is not a slow test. It is a TIMEOUT on a scheduled dependency
 bump — the run nobody is watching, whose reflex fix is to click re-run rather
