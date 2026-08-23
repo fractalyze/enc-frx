@@ -1,25 +1,29 @@
 # Copyright 2026 The enc-frx Authors. SPDX-License-Identifier: Apache-2.0
 """Poly1305, per RFC 8439 §2.5.
 
-A polynomial evaluated over `GF(2^130 - 5)`. Not cryptographically hard, but the
-one part of ChaCha20-Poly1305 that is numerically awkward here, for a reason
-worth stating: **this stack has no 64-bit integer lane.** FRX runs with x64
-disabled, so a `uint64` request is silently truncated to `uint32`, and
-`zk_dtypes.uint128` is a host dtype that no traced array can hold.
+A polynomial evaluated over `GF(2^130 - 5)` — not cryptographically hard, but
+the one part of ChaCha20-Poly1305 that has to carry a field this stack has no
+native integer width for.
 
-That rules out the layout every reference implementation uses — five limbs of 26
-bits, whose products are 52 bits and need a 64-bit accumulator. With `uint32`
-lanes a product must fit in 32 bits, so the limbs must be at most 16.
+**The field is `zk_dtypes.prime_field(2^130 - 5)`**, worked in its Montgomery
+storage variant where the multiply is fast. An element is one value, not a limb
+vector, so the polynomial is spelled in operators.
 
-**The radix is 2^13 with ten limbs**, and 13 is not a tuning choice: the
-reduction `2^130 = 5` is a clean convolution only when the limbs tile 130 bits
-exactly, and 130 factors as 13 x 10 (26 x 5 being the layout that does not fit).
-Each product is then under 2^26, and the widest accumulator is
+RFC 8439's block encoding is little-endian and so is the field's canonical
+storage, so a padded block crosses into the trace as a `view` and reaches
+Montgomery storage by an `astype`. The final tag needs no separate reduction
+step either: canonical storage already holds the fully reduced residue, so its
+low 16 bytes are `acc mod p mod 2^128`, which is what §2.5.1 asks for.
 
-    d_0 = h_0 r_0 + 5 (h_1 r_9 + ... + h_9 r_1)
-
-which is at most 46 units of 2^26 — under 2^32 with 28% to spare. Every limb is
-carried below 2^13 before it is multiplied, which is what keeps that bound true.
+This replaced a hand-rolled layout of ten limbs of radix 2^13 on uint32 lanes.
+That layout was forced rather than chosen — FRX runs with x64 disabled, so a
+`uint64` request is silently truncated and a limb product had to fit `uint32`,
+which put the radix at 13 and made the reduction a ten-way convolution with its
+own carry sweep and accumulator bound. A registered field dtype removes the
+constraint entirely, and it is faster by 8.6-11x on CPU and 1.7-2.2x on CUDA at
+16 KiB messages — measured on frx 0.10.2.dev20260822150923, the last build
+carrying both layouts. `testing/mac_bench.py` holds that table and the one it
+still re-measures every run.
 
 **Parallelism comes from the batch, not from within a message.** Block `i + 1`'s
 accumulator depends on block `i`'s, so `B` messages are `B` independent Horner
@@ -35,6 +39,7 @@ from __future__ import annotations
 import frx
 import frx.numpy as fnp
 import numpy as np
+import zk_dtypes
 from frx import Array
 from frx.typing import ArrayLike
 
@@ -42,11 +47,15 @@ KEY_SIZE = 32
 TAG_SIZE = 16
 BLOCK_SIZE = 16
 
-_LIMBS = 10
-_RADIX_BITS = 13
-_LIMB_MASK = np.uint32((1 << _RADIX_BITS) - 1)
+_P = 2**130 - 5
+# Canonical storage is the RFC's little-endian encoding, so bytes cross into
+# WIRE as a view; WORK is where the multiply is fast, an `astype` away.
+WIRE = np.dtype(zk_dtypes.prime_field(_P, "std"))
+WORK = np.dtype(zk_dtypes.prime_field(_P, "mont"))
+_FIELD_BYTES = 32
+
 # The 17th byte carries bit 128 — the `1` appended to every block — so the byte
-# form a limb decomposition reads is one byte wider than the block.
+# form a block is read as is one byte wider than the block itself.
 _PADDED_BLOCK = BLOCK_SIZE + 1
 
 # RFC 8439 §2.5.1: the top four bits of every fourth byte, and the bottom two of
@@ -58,93 +67,28 @@ _CLAMP = np.array(
 )
 
 
-def _limbs(data: Array) -> Array:
-    """`uint8 [..., 17]` -> `uint32 [..., 10]`, radix 2^13, little-endian."""
-    wide = data.astype(fnp.uint32)
-    lanes = []
-    for limb in range(_LIMBS):
-        start = limb * _RADIX_BITS
-        byte, offset = divmod(start, 8)
-        value = wide[..., byte] >> np.uint32(offset)
-        value = value | (wide[..., byte + 1] << np.uint32(8 - offset))
-        if byte + 2 < data.shape[-1]:
-            value = value | (wide[..., byte + 2] << np.uint32(16 - offset))
-        lanes.append(value & _LIMB_MASK)
-    return fnp.stack(lanes, axis=-1)
+def _to_field(padded: Array) -> Array:
+    """uint8 `[..., 17]` -> one WORK element per row.
 
-
-def _carry(lanes: list[Array]) -> Array:
-    """Normalize every limb below 2^13, folding the overflow back through 5.
-
-    Two passes, because the fold puts up to `5 * carry` back into limb 0 and that
-    can itself exceed the radix. After the second pass every limb is in range and
-    the value is below 2^130, which is what the multiply's bound assumes.
+    The 17 bytes hold a value below 2^129, so zero-padding to the field's 32
+    and viewing is exact — canonical storage *is* the little-endian encoding.
     """
-    for _ in range(2):
-        carry = fnp.zeros_like(lanes[0])
-        for index in range(_LIMBS):
-            total = lanes[index] + carry
-            carry = total >> np.uint32(_RADIX_BITS)
-            lanes[index] = total & _LIMB_MASK
-        lanes[0] = lanes[0] + carry * np.uint32(5)
-    return fnp.stack(lanes, axis=-1)
+    pad = [(0, 0)] * (padded.ndim - 1) + [(0, _FIELD_BYTES - padded.shape[-1])]
+    return fnp.pad(padded, pad).view(WIRE).astype(WORK)
 
 
-def _add(left: Array, right: Array) -> Array:
-    return _carry([left[..., i] + right[..., i] for i in range(_LIMBS)])
+def _absorb(
+    state: tuple[Array, Array], block: Array
+) -> tuple[tuple[Array, Array], None]:
+    """One RFC 8439 §2.5 step: `acc = (acc + block) * r`.
 
-
-def _mul(accumulator: Array, r: Array, r5: Array) -> Array:
-    """`accumulator * r` reduced mod 2^130 - 5.
-
-    `r5` is `5 * r`, precomputed because every term that wraps past limb 9 picks
-    up that factor — the whole reason the radix tiles 130 bits exactly.
+    `r` rides the scan carry rather than being closed over, because frx keys
+    the loop-body lowering cache on the body function's identity (the gotcha
+    `aes/ghash._absorb` measured): a closure minted per `mac` call would
+    re-trace the body every call.
     """
-    products = []
-    for index in range(_LIMBS):
-        total = accumulator[..., 0] * r[..., index]
-        for j in range(1, index + 1):
-            total = total + accumulator[..., j] * r[..., index - j]
-        for j in range(index + 1, _LIMBS):
-            total = total + accumulator[..., j] * r5[..., index + _LIMBS - j]
-        products.append(total)
-    return _carry(products)
-
-
-def _reduce_fully(accumulator: Array) -> Array:
-    """Subtract the modulus once if the accumulator is at or above it.
-
-    The value is already below 2^130 and the modulus is 2^130 - 5, so one
-    conditional subtraction suffices. It is expressed as "add 5 and keep the
-    result when it carries past bit 130", which is the same test without a
-    borrow.
-    """
-    lanes = [accumulator[..., i] for i in range(_LIMBS)]
-    candidate = []
-    carry = np.uint32(5)
-    for index in range(_LIMBS):
-        total = lanes[index] + carry
-        carry = total >> np.uint32(_RADIX_BITS)
-        candidate.append(total & _LIMB_MASK)
-    # A carry out of the top limb means the addition passed 2^130, so the
-    # candidate is the reduced value. Selected arithmetically, per entry.
-    use_candidate = (carry != 0)[..., None]
-    return fnp.where(use_candidate, fnp.stack(candidate, axis=-1), accumulator)
-
-
-def _to_bytes(accumulator: Array) -> Array:
-    """`uint32 [..., 10]` radix-2^13 limbs -> the low 16 bytes, little-endian."""
-    lanes = []
-    for byte in range(TAG_SIZE):
-        start = byte * 8
-        limb, offset = divmod(start, _RADIX_BITS)
-        value = accumulator[..., limb] >> np.uint32(offset)
-        if limb + 1 < _LIMBS:
-            value = value | (
-                accumulator[..., limb + 1] << np.uint32(_RADIX_BITS - offset)
-            )
-        lanes.append(value & np.uint32(0xFF))
-    return fnp.stack(lanes, axis=-1)
+    accumulator, r = state
+    return ((accumulator + block) * r, r), None
 
 
 def _add_mod_2_128(left: Array, right: Array) -> Array:
@@ -193,18 +137,18 @@ def mac(key: ArrayLike, message: ArrayLike) -> Array:
     key = fnp.asarray(key, dtype=fnp.uint8)
     message = fnp.asarray(message, dtype=fnp.uint8)
 
-    r_bytes = key[..., :BLOCK_SIZE] & fnp.asarray(_CLAMP)
-    r = _limbs(fnp.pad(r_bytes, [(0, 0)] * (r_bytes.ndim - 1) + [(0, 1)]))
-    r5 = r * np.uint32(5)
+    r = _to_field(key[..., :BLOCK_SIZE] & fnp.asarray(_CLAMP))
 
-    accumulator = fnp.zeros((*message.shape[:-1], _LIMBS), dtype=fnp.uint32)
+    accumulator = fnp.broadcast_to(
+        fnp.asarray(np.array([0], dtype=WORK)), (*message.shape[:-1], 1)
+    )
     if message.shape[-1]:
-        blocked = _blocks(message)
+        blocked = _to_field(_blocks(message))
+        (accumulator, _), _ = frx.lax.scan(_absorb, (accumulator, r), blocked)
 
-        def absorb(state: Array, block: Array) -> tuple[Array, None]:
-            return _mul(_add(state, _limbs(block)), r, r5), None
-
-        accumulator, _ = frx.lax.scan(absorb, accumulator, blocked)
-
-    tag = _to_bytes(_reduce_fully(accumulator))
-    return _add_mod_2_128(tag, key[..., BLOCK_SIZE:].astype(fnp.uint32))
+    # Canonical storage holds the fully reduced residue, so its low 16 bytes
+    # are `acc mod p mod 2^128` — no separate reduction step.
+    tag = accumulator.astype(WIRE).view(fnp.uint8)[..., :TAG_SIZE]
+    return _add_mod_2_128(
+        tag.astype(fnp.uint32), key[..., BLOCK_SIZE:].astype(fnp.uint32)
+    )

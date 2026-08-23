@@ -2,10 +2,9 @@
 """Poly1305 against RFC 8439, and against exact integer arithmetic.
 
 The published vectors gate the construction. They do not gate the thing most
-likely to be wrong here: the limb layout. This implementation carries ten limbs
-of 13 bits in `uint32` lanes because the stack has no 64-bit integer, and its
-correctness rests on an accumulator bound that a handful of vectors will never
-approach.
+likely to be wrong here: how a 130-bit value crosses between bytes and the
+field. The polynomial itself is three operators; the encoding either lines up
+exactly or it does not, and a handful of vectors will not tell you which.
 
 So the real gate is `differential`: the same messages and keys through a
 `GF(2^130 - 5)` reference written in Python's arbitrary-precision integers, on
@@ -91,22 +90,42 @@ class Poly1305DifferentialTest(parameterized.TestCase):
         self.assertEqual(_mac(_KEY_2_5_2, b""), _reference(_KEY_2_5_2, b""))
 
 
-class Poly1305LayoutTest(absltest.TestCase):
-    def test_the_accumulator_cannot_overflow_a_uint32_lane(self) -> None:
-        # The invariant the whole limb layout rests on, restated where a change
-        # to the radix would trip it. Limbs are carried below 2^RADIX before any
-        # multiply, so each product is under 2^(2*RADIX); term `d_i` sums `i + 1`
-        # of them directly and `LIMBS - 1 - i` more with the factor 5 the
-        # reduction contributes.
-        unit = 1 << (2 * poly1305._RADIX_BITS)
-        worst = max(
-            (index + 1) + 5 * (poly1305._LIMBS - 1 - index)
-            for index in range(poly1305._LIMBS)
+class Poly1305EncodingTest(absltest.TestCase):
+    """The two byte-boundary properties the field path rests on."""
+
+    def test_a_padded_block_views_as_the_integer_it_encodes(self) -> None:
+        # `_to_field` pads a 17-byte block to the field's width and views it.
+        # That is exact only if canonical storage is the little-endian encoding
+        # — the same property the x25519 ladder leans on, restated here because
+        # a storage change upstream would break it silently.
+        # `_blocks` sets exactly one high byte to 0 or 1 — the RFC's appended
+        # `1` lands past the sixteenth byte only for a full block — so a block
+        # is always below 2^129 and needs no reduction to be canonical. Sample
+        # that domain, not arbitrary 17-byte strings.
+        rng = np.random.default_rng(0)
+        blocks = np.concatenate(
+            [
+                rng.integers(0, 256, (8, poly1305.BLOCK_SIZE), dtype=np.uint8),
+                rng.integers(0, 2, (8, 1), dtype=np.uint8),
+            ],
+            axis=-1,
         )
-        self.assertLess(worst * unit, 1 << 32)
-        # And the radix must tile 130 bits exactly, or the reduction is not a
-        # single-factor convolution.
-        self.assertEqual(poly1305._LIMBS * poly1305._RADIX_BITS, 130)
+        got = np.asarray(poly1305._to_field(fnp.asarray(blocks)).astype(poly1305.WIRE))
+        for index, block in enumerate(blocks):
+            want = int.from_bytes(bytes(block), "little")
+            self.assertLess(want, _P, "a padded block must already be reduced")
+            self.assertEqual(int(got[index, 0]), want)
+
+    def test_canonical_storage_is_reduced_so_the_tag_needs_no_reduction(self) -> None:
+        # `mac` reads the tag as the low 16 bytes of canonical storage, with no
+        # reduction step, which is correct only because canonical storage holds
+        # the residue in [0, p). Check the boundary: p - 1 must survive the
+        # round trip, and p itself must come back as 0.
+        for value, want in ((_P - 1, _P - 1), (_P, 0), (_P + 1, 1)):
+            element = np.array([value % _P], dtype=poly1305.WIRE)
+            self.assertEqual(int(element[0]), want)
+            low = element.view(np.uint8)[: poly1305.TAG_SIZE]
+            self.assertEqual(int.from_bytes(bytes(low), "little"), want % (1 << 128))
 
 
 class Poly1305BatchTest(absltest.TestCase):
