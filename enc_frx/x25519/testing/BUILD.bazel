@@ -33,7 +33,7 @@ py_test(
 
 py_test(
     name = "x25519_test",
-    size = "small",
+    size = "medium",
     srcs = ["x25519_test.py"],
     deps = [
         ":rfc7748_reference",

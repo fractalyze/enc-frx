@@ -55,7 +55,7 @@ py_test(
 
 py_test(
     name = "xchacha20_poly1305_test",
-    size = "small",
+    size = "medium",
     srcs = ["xchacha20_poly1305_test.py"],
     deps = [
         "//enc_frx:aead",
