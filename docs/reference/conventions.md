@@ -174,6 +174,30 @@ rather than a description: a corpus small enough to run per PR runs per PR,
 because what the tag buys is review speed and what it costs is a suite that no
 longer blocks a merge.
 
+### A size is a ceiling, not a budget
+
+A target's `size` is the timeout Bazel kills it at — 60s for `small`, 300s for
+`medium`, 900s for `large`. It is not a claim about how fast the test is, and
+declaring a tight one buys nothing: a generous cap costs nothing until a test
+hangs, while a tight one converts runner contention into a red leg.
+
+**A test that baselines past half its cap is mis-sized.** Read that against the
+slower of the two legs rather than their average, and don't assume which leg
+that is — the GPU one for most targets here, the CPU one for x25519's ladder.
+Half is the line because the idle-to-loaded spread on a single leg is about
+that: `xchacha20_poly1305_test` measured 37.1s on an idle GPU runner and 46.4s
+on a loaded one, against a 60s cap.
+
+Baseline against the CI legs and not a workstation, which runs these two to
+three times faster. Bazel's own `Consider setting size="small"` warning is
+measured against whichever box just ran the test, so locally it fires for every
+chacha target — including the one that takes 70s on the GPU runner. The warning
+is about that machine; the size is not.
+
+What this prevents is not a slow test. It is a TIMEOUT on a scheduled dependency
+bump — the run nobody is watching, whose reflex fix is to click re-run rather
+than to read the log, and which says nothing about the code it just failed.
+
 ### A vector is fetched, never transcribed
 
 Hex copied by hand is not a test vector. Fetch the standard's text or the
