@@ -27,7 +27,7 @@ py_test(
 
 py_test(
     name = "poly1305_test",
-    size = "medium",
+    size = "small",
     srcs = ["poly1305_test.py"],
     deps = [
         ":rfc8439_reference",

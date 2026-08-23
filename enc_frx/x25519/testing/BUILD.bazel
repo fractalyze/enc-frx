@@ -17,7 +17,7 @@ py_library(
 # //MODULE.bazel rather than committed.
 py_test(
     name = "dhkem_test",
-    size = "large",
+    size = "medium",
     srcs = ["dhkem_test.py"],
     data = ["@hpke_test_vectors//file"],
     deps = [
@@ -33,7 +33,7 @@ py_test(
 
 py_test(
     name = "x25519_test",
-    size = "large",
+    size = "medium",
     srcs = ["x25519_test.py"],
     deps = [
         ":rfc7748_reference",
