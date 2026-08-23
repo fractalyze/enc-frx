@@ -19,64 +19,43 @@ only difference is where the field material comes from:
 
 **`wire / mont` is the number this bench exists for, and unlike the x25519
 ladder's it is not 1.0** — the plumbing is a real fraction of the work here.
-The whole default sweep, on frx 0.10.2.dev20260823002126, RTX 5090 +
-Ryzen 9 9950X, median of six passes on an otherwise idle box:
+The whole default sweep, on frx 0.10.2.dev20260823002126 (the pin this branch
+runs on), RTX 5090 + Ryzen 9 9950X. Median of six passes, with the spread each
+ratio showed across them, because most of these cells are not stable enough to
+quote as a single number:
 
 ```
-                CUDA                        CPU
-   B    bytes   mont     wire   ratio     mont     wire   ratio
-   1       64   0.05ms   0.08ms  1.50     0.01ms   0.02ms  1.77
-   1     1024   0.22ms   0.24ms  1.09     0.01ms   0.04ms  4.15
-   1    16384   2.89ms   2.91ms  1.01     0.04ms   0.10ms  2.29
- 256       64   0.05ms   0.08ms  1.68     0.03ms   0.11ms  4.62
- 256     1024   0.21ms   0.25ms  1.17     0.21ms   0.42ms  1.99
- 256    16384   2.92ms   2.98ms  1.03     3.25ms   5.19ms  1.60
+                CUDA                            CPU
+   B    bytes   mont     wire   ratio       mont     wire   ratio
+   1       64   0.05ms   0.08ms  1.10-1.85   0.01ms   0.02ms  1.19-3.85
+   1     1024   0.22ms   0.24ms  1.04-1.14   0.01ms   0.04ms  2.38-5.55
+   1    16384   2.89ms   2.91ms  0.97-1.01   0.04ms   0.10ms  1.83-3.73
+ 256       64   0.05ms   0.08ms  1.52-1.79   0.03ms   0.11ms  2.69-5.74
+ 256     1024   0.21ms   0.25ms  1.10-1.22   0.21ms   0.42ms  1.78-2.20
+ 256    16384   2.92ms   2.98ms  1.00-1.06   3.25ms   5.19ms  1.58-1.64
 ```
 
-**Three cells in this table are stable enough to compare against a later run**,
-and all three are the 16 KiB rows: CUDA holds 0.97-1.01 at B = 1 and 1.00-1.06
-at B = 256, CPU 1.58-1.64 at B = 256. Everything else moves, and the shorter
-the call the more it moves:
+**Only three cells are tight enough to compare against a later run — the
+16 KiB rows, minus CPU at B = 1 — so a pin bump is a regression only if it
+moves one of those.** The rest is arithmetic, not fusion: a B = 1 CPU call is
+0.01-0.10ms, and the `mont` column there is at the printed resolution, so a
+0.01ms cell is anything from 0.005 to 0.014 and a ratio recomputed from the
+printed columns is worth a factor of three on its own. Run it on an idle box,
+too — a pass taken while another job held this one moved the CPU 16 KiB cell
+to 2.10, further than any idle pass did.
 
-```
-                    ratio, min-max over six passes
-   B    bytes     CUDA          CPU
-   1       64   1.10-1.85     1.19-3.85
-   1     1024   1.04-1.14     2.38-5.55
-   1    16384   0.97-1.01     1.83-3.73
- 256       64   1.52-1.79     2.69-5.74
- 256     1024   1.10-1.22     1.78-2.20
- 256    16384   1.00-1.06     1.58-1.64
-```
-
-The reason is arithmetic, not fusion: on CPU a B = 1 call is 0.01-0.10ms
-against the ~0.005ms dispatch floor `ladder_bench` reports on this box, and the
-`mont` column there is at the printing resolution — a 0.01ms cell is anything
-from 0.005 to 0.014, so the ratio it forms is worth a factor of three on its
-own. **A pin bump is a regression here only if it moves a 16 KiB row.** Nothing
-at B = 1 on the CPU leg, and nothing at 64 bytes on either leg, should be read
-as a figure.
-
-Idleness is part of the measurement, not a nicety. A seventh pass taken while
-another job held the box read 2.10 in the CPU 16 KiB cell, against 1.58-1.64
-idle — further than any idle pass moved. Run it on a quiet machine or do not
-run it.
-
-What the sweep does establish is the shape, and wherever the numbers mean
-anything — both CUDA rows, and CPU at B = 256 — the ratio falls monotonically
-with message length. A 16 KiB message is 1024 blocks, and framing them means
-materialising 1024 x 17 bytes and then 1024 x 32; that fixed plumbing is most
-of a short call and a shrinking fraction of a long one. On CPU it is still 37%
-of the call at 16 KiB, against a scan that is already fast, and the wire arm
-gets 0.80 GB/s there against CUDA's 1.41. CUDA absorbs the framing at length
-(1.03 at 16 KiB) and pays it at 64 bytes, where it does not have enough work
-to hide behind. So the ratio reads as a standing question — how much of
-Poly1305 is byte plumbing — rather than as an invariant to hold at 1.0, and a
-pin bump that changed the fusion story would move it either way.
+What the sweep does establish is the shape, and where the spreads above are
+tight the ratio falls monotonically with message length. A 16 KiB message is
+1024 blocks, and framing them means materialising 1024 x 17 bytes and then
+1024 x 32 — fixed plumbing that is most of a short call and a shrinking
+fraction of a long one, still 37% of the CPU call at 16 KiB against a scan
+that is already fast, and nearly free on CUDA there. So the ratio reads as a
+standing question — how much of Poly1305 is byte plumbing — rather than as an
+invariant to hold at 1.0, and a pin bump that changed the fusion story would
+move it either way.
 
 Nothing runs it automatically: it is a `py_binary`, and CI builds it without
-executing it — so the table above is only as fresh as the last person to run
-it, and it re-measures every run.
+executing it, so the table is only as fresh as the last person to run it.
 
 ## Why the limb field is gone
 
@@ -113,9 +92,15 @@ canonical storage is already the reduced residue.
 That comparison is not reproducible from here, the limb arm having left with
 the layout; the table above is what remains, and it re-measures every run.
 
-Run:
-    bazel run //enc_frx/chacha/testing:mac_bench
-    bazel run //enc_frx/chacha/testing:mac_bench -- --sizes=64,1024,65536
+Run — one invocation is one leg, so the two-leg table above takes two. A pass
+is one whole invocation; the table is the per-column median of six of them per
+leg, taken by hand, which is why a single run of your own lands inside the
+spreads rather than on the medians:
+
+    FRX_PLATFORMS=cuda bazel run //enc_frx/chacha/testing:mac_bench
+    FRX_PLATFORMS=cpu  bazel run //enc_frx/chacha/testing:mac_bench
+    FRX_PLATFORMS=cpu  bazel run //enc_frx/chacha/testing:mac_bench -- \
+        --sizes=64,1024,65536
 """
 
 from __future__ import annotations

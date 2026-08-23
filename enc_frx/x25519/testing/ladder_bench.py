@@ -40,13 +40,13 @@ on an otherwise idle box:
 8192   1.82ms   1.85ms  1.01   134.81ms 134.60ms  0.99
 ```
 
-The ratio is 1.0 on both legs across the sweep — the boundary is free, which
-is the whole claim, and unlike `mac_bench`'s it holds run to run: 0.99-1.03 on
-CUDA at every batch, and 0.96-1.06 on CPU from B = 32 up, across those six
-passes. CUDA is flat from B = 1 (0.2us/op at 8192, dispatch floor 0.030ms).
+The ratio is 1.0 on both legs from B = 32 up — the boundary is free, which is
+the whole claim, and unlike `mac_bench`'s it holds run to run: 0.99-1.03 on
+CUDA at every batch, 0.96-1.06 on CPU. CUDA is flat from B = 1 (0.2us/op at
+8192, dispatch floor 0.030ms).
 
-CPU is not flat, and it does not saturate. It holds ~51-56us/op from B = 32
-through B = 2048 and then falls away:
+CPU per-op cost is flat only to B = 2048 — 51-56us/op from B = 32 — and then
+falls away:
 
 ```
    B    wire/op        B    wire/op
@@ -56,21 +56,21 @@ through B = 2048 and then falls away:
 2048     51.0us
 ```
 
-The break is between 2048 and 4096, where doubling the batch costs 1.06x the
-wall (104.35ms -> 110.93ms) rather than 2x — the batch axis starts being spread
-across cores there, and per-op cost keeps improving to at least B = 16384.
-Those per-op rows are not the default sweep — they come from
-`--batches=32,256,1024,2048,4096,8192,16384`, which is worth re-running
-whenever the five-row table moves.
+Doubling the batch across the break costs 1.06x the wall rather than 2x, and
+per-op cost keeps improving to at least B = 16384. The cause is not settled and
+nothing here claims one — cross-core spreading fits, but so does cache
+residency or a backend partitioning switch, and the smooth 27.1 -> 16.7 -> 14.6
+tail past the break is not the step a core-count threshold predicts. Those
+per-op rows are not the default sweep; they come from
+`--batches=32,256,1024,2048,4096,8192,16384`, worth re-running if the
+B = 32..2048 plateau ever leaves 51-56us/op.
 
-Read the ratio, not the millisecond: CPU rows move several percent run to run,
-and the B = 1 row is the arms' asymmetry rather than the boundary — the
-scalar-bit expansion is most of a 0.09ms ladder there, and nothing at that
-batch size is dispatch-bound enough to hide it. That cell is by far the least
-stable in the table, spanning 0.87 to 1.43 across the six passes while every
-other CPU cell stayed inside 0.96-1.06 — a 0.09ms call is only 18x the 0.005ms
-CPU dispatch floor, so treat the row as present-and-sane rather than as a
-measurement.
+Read the ratio, not the millisecond, and read the B = 1 row as the arms'
+asymmetry rather than the boundary: the scalar-bit expansion is most of a
+0.09ms ladder there, and nothing at that batch size is dispatch-bound enough
+to hide it. That cell is by far the least stable in the table, spanning 0.87
+to 1.43 across the six passes, so treat it as present-and-sane rather than as
+a measurement.
 
 CUDA being flat from B = 1 is new, and it is what hoisting the RFC's running
 `swap ^= k_t` out of the loop bought (`x25519._swap_conditions`): the XOR made
@@ -105,9 +105,15 @@ in `x25519_test`, not on the fixed vectors here. A bench verifies that an arm
 computes the right function before it earns a row; it is not the correctness
 gate, and for a rare-rate arithmetic fault it structurally cannot be.
 
-Run:
-    bazel run //enc_frx/x25519/testing:ladder_bench
-    bazel run //enc_frx/x25519/testing:ladder_bench -- --batches=1,256,8192
+Run — one invocation is one leg, so the two-leg table above takes two. A pass
+is one whole invocation; the table is the per-column median of six of them per
+leg, taken by hand, which is why a single run of your own lands inside the
+quoted spreads rather than on the medians:
+
+    FRX_PLATFORMS=cuda bazel run //enc_frx/x25519/testing:ladder_bench
+    FRX_PLATFORMS=cpu  bazel run //enc_frx/x25519/testing:ladder_bench
+    FRX_PLATFORMS=cpu  bazel run //enc_frx/x25519/testing:ladder_bench -- \
+        --mul_batch=0 --batches=32,256,1024,2048,4096,8192,16384
 """
 
 from __future__ import annotations
