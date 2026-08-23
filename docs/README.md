@@ -11,7 +11,7 @@ scheme is held to, **[`schemes/`](schemes)** is one design-notes page per scheme
 | Question | Where |
 | -------- | ----- |
 | What does this implementation claim against an adversary who can measure it — and what does that rule out as a use? | [`security.md`](reference/security.md) |
-| The rules a scheme is held to — the batch axis, how failure is carried, the KAT gate | [`conventions.md`](reference/conventions.md) |
+| The rules a scheme is held to — the batch axis, how failure is carried, the KAT gate, what a test's size declares | [`conventions.md`](reference/conventions.md) |
 
 ## `schemes/` — one page per scheme
 
