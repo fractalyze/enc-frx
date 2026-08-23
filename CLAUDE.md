@@ -32,6 +32,32 @@ this file is the map plus the rules every change must respect.
   to yield a different shared secret rather than an error. Making them look alike
   would be the most dangerous change in the repo.
 
+## Measuring a change
+
+Both arms of a performance A/B belong in **one process**. Comparing a run of the
+tree before a change against a run after it has produced the wrong *sign* here,
+not merely the wrong magnitude — compile-cache and process state dominate
+differences of a few percent, which is the size most of these changes are. Two
+arms that cannot share a process do not produce a quotable number.
+
+Warm-ups get the same treatment: confirm yours moved the number before building
+on it. `kem_bench`'s dispatch floor needs sustained work, and the single-call
+warm-up that looks obviously sufficient changes nothing.
+
+**A one-time cost is reported as a break-even, not folded into a ratio.** Work
+hoisted out of a per-call path onto a per-key or per-session setup is only a win
+after enough calls to repay the setup, and that count is the number a caller
+needs. It is also where the backends disagree: an unbatched setup call is
+latency-bound on GPU, so its cost is flat across parameter sets and can exceed a
+whole batch, while the same call on CPU is real work that scales and repays
+inside the first batch. A speedup column alone hides a case that is slower.
+
+**Derive how many warm calls are behind each figure before quoting it.** The
+harness averages against a wall-clock budget, so the largest batch sizes silently
+collapse toward a single call while looking exactly like the well-sampled rows.
+A ratio that breaks its own table's trend is a sampling artifact until shown
+otherwise.
+
 The hot paths here hold a long-lived secret key and take adversary-chosen input,
 which is the inverse of `sig-frx`. That has consequences for every scheme, so
 read [`docs/reference/security.md`](docs/reference/security.md) before
