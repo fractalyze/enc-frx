@@ -27,26 +27,50 @@ when someone runs it.
 
 ## What it measures now
 
-frx 0.10.2.dev20260823002126, RTX 5090 + Ryzen 9 9950X:
+frx 0.10.2.dev20260823002126, RTX 5090 + Ryzen 9 9950X, median of six passes
+on an otherwise idle box:
 
 ```
             CUDA                        CPU
    B   mont     wire   ratio     mont     wire   ratio
-   1   1.72ms   1.73ms  1.01     0.09ms   0.10ms  1.16
-  32   1.71ms   1.73ms  1.01     1.79ms   1.76ms  0.98
- 256   1.78ms   1.79ms  1.01    13.53ms  14.38ms  1.06
-1024   1.78ms   1.80ms  1.01    53.53ms  53.85ms  1.01
-8192   1.82ms   1.84ms  1.01   136.91ms 137.60ms  1.01
+   1   1.70ms   1.72ms  1.01     0.09ms   0.10ms  1.17
+  32   1.69ms   1.71ms  1.01     1.71ms   1.72ms  1.00
+ 256   1.77ms   1.80ms  1.02    13.20ms  13.71ms  1.04
+1024   1.79ms   1.80ms  1.00    52.11ms  52.99ms  1.02
+8192   1.82ms   1.85ms  1.01   134.81ms 134.60ms  0.99
 ```
 
-The ratio is 1.0 on both legs across the sweep — the boundary is free, which
-is the whole claim. CUDA is flat from B = 1 (0.2us/op at 8192, dispatch floor
-0.030ms); CPU saturates around 53us/op and stops improving past B = 32.
+The ratio is 1.0 on both legs from B = 32 up — the boundary is free, which is
+the whole claim, and unlike `mac_bench`'s it holds run to run: 0.99-1.03 on
+CUDA at every batch, 0.96-1.06 on CPU. CUDA is flat from B = 1 (0.2us/op at
+8192, dispatch floor 0.030ms).
 
-Read the ratio, not the millisecond: CPU rows move several percent run to run,
-and the B = 1 row is the arms' asymmetry rather than the boundary — the
-scalar-bit expansion is most of a 0.09ms ladder there, and nothing at that
-batch size is dispatch-bound enough to hide it.
+CPU per-op cost is flat only to B = 2048 — 51-56us/op from B = 32 — and then
+falls away:
+
+```
+   B    wire/op        B    wire/op
+  32     55.8us     4096     27.1us
+ 256     55.4us     8192     16.7us
+1024     52.1us    16384     14.6us
+2048     51.0us
+```
+
+Doubling the batch across the break costs 1.06x the wall rather than 2x, and
+per-op cost keeps improving to at least B = 16384. The cause is not settled and
+nothing here claims one — cross-core spreading fits, but so does cache
+residency or a backend partitioning switch, and the smooth 27.1 -> 16.7 -> 14.6
+tail past the break is not the step a core-count threshold predicts. Those
+per-op rows are not the default sweep; they come from
+`--batches=32,256,1024,2048,4096,8192,16384`, worth re-running if the
+B = 32..2048 plateau ever leaves 51-56us/op.
+
+Read the ratio, not the millisecond, and read the B = 1 row as the arms'
+asymmetry rather than the boundary: the scalar-bit expansion is most of a
+0.09ms ladder there, and nothing at that batch size is dispatch-bound enough
+to hide it. That cell is by far the least stable in the table, spanning 0.87
+to 1.43 across the six passes, so treat it as present-and-sane rather than as
+a measurement.
 
 CUDA being flat from B = 1 is new, and it is what hoisting the RFC's running
 `swap ^= k_t` out of the loop bought (`x25519._swap_conditions`): the XOR made
@@ -81,9 +105,15 @@ in `x25519_test`, not on the fixed vectors here. A bench verifies that an arm
 computes the right function before it earns a row; it is not the correctness
 gate, and for a rare-rate arithmetic fault it structurally cannot be.
 
-Run:
-    bazel run //enc_frx/x25519/testing:ladder_bench
-    bazel run //enc_frx/x25519/testing:ladder_bench -- --batches=1,256,8192
+Run — one invocation is one leg, so the two-leg table above takes two. A pass
+is one whole invocation; the table is the per-column median of six of them per
+leg, taken by hand, which is why a single run of your own lands inside the
+quoted spreads rather than on the medians:
+
+    FRX_PLATFORMS=cuda bazel run //enc_frx/x25519/testing:ladder_bench
+    FRX_PLATFORMS=cpu  bazel run //enc_frx/x25519/testing:ladder_bench
+    FRX_PLATFORMS=cpu  bazel run //enc_frx/x25519/testing:ladder_bench -- \
+        --mul_batch=0 --batches=32,256,1024,2048,4096,8192,16384
 """
 
 from __future__ import annotations
