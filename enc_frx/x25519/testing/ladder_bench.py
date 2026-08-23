@@ -32,16 +32,16 @@ frx 0.10.2.dev20260822150923, RTX 5090 + Ryzen 9 9950X:
 ```
             CUDA                        CPU
    B   mont     wire   ratio     mont     wire   ratio
-   1   4.15ms   4.17ms  1.00     0.09ms   0.11ms  1.17
-  32   2.88ms   2.87ms  1.00     1.83ms   1.84ms  1.01
- 256   2.23ms   2.24ms  1.01    14.18ms  14.98ms  1.06
-1024   2.42ms   2.31ms  0.95    56.98ms  57.61ms  1.01
-8192   2.29ms   2.33ms  1.02   146.03ms 151.09ms  1.03
+   1   3.81ms   3.82ms  1.00     0.08ms   0.11ms  1.34
+  32   2.73ms   2.76ms  1.01     1.76ms   1.77ms  1.01
+ 256   2.14ms   2.15ms  1.00    13.27ms  13.58ms  1.02
+1024   2.16ms   2.17ms  1.01    53.44ms  53.76ms  1.01
+8192   2.18ms   2.22ms  1.02   128.62ms 128.47ms  1.00
 ```
 
 The ratio is 1.0 on both legs across the sweep — the boundary is free, which
 is the whole claim. CUDA is flat from B = 256 (0.3us/op at 8192, dispatch
-floor 0.027ms); CPU saturates around 57us/op and stops improving past B = 32.
+floor 0.032ms); CPU saturates around 53us/op and stops improving past B = 32.
 
 Read the ratio, not the millisecond: CPU rows move several percent run to run,
 and the B = 1 row is the arms' asymmetry rather than the boundary — 0.02ms of
