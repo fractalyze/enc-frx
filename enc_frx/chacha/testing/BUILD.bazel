@@ -15,7 +15,7 @@ py_library(
 
 py_test(
     name = "chacha20_test",
-    size = "small",
+    size = "medium",
     srcs = ["chacha20_test.py"],
     deps = [
         "//enc_frx/chacha:chacha20",
@@ -27,7 +27,7 @@ py_test(
 
 py_test(
     name = "poly1305_test",
-    size = "small",
+    size = "medium",
     srcs = ["poly1305_test.py"],
     deps = [
         ":rfc8439_reference",
@@ -55,7 +55,7 @@ py_test(
 
 py_test(
     name = "xchacha20_poly1305_test",
-    size = "small",
+    size = "medium",
     srcs = ["xchacha20_poly1305_test.py"],
     deps = [
         "//enc_frx:aead",
