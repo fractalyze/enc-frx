@@ -6,9 +6,23 @@ Batch-first like every hot path in this repo: `x25519(k, u)` takes uint8
 traced computation — the ladder is 255 identical, data-independent iterations
 (`lax.fori_loop`), so the batch is pure width. The scalar enters through the
 §5 clamp and the u-coordinate through the top-bit mask, both spelled here
-exactly as the RFC spells them; the conditional swap is an XOR mask, not a
-branch, though per `docs/reference/security.md` no constant-time claim follows
-from that.
+exactly as the RFC spells them; the conditional swap is a `where` over a bit
+that is a value rather than a branch, though per `docs/reference/security.md`
+no constant-time claim follows from that.
+
+**The field is `zk_dtypes.curve25519_bf`**, whose arithmetic lowers to
+frxlib's native prime-field kernels, in the Montgomery storage variant
+`curve25519_bf_mont` where the fast multiply lives. A field element is one
+value carrying a trailing unit axis, not a limb vector, so the ladder is
+spelled in operators.
+
+The RFC's byte encoding *is* the canonical storage of `curve25519_bf`, so the
+uint8 boundary is a free `view` on each side and the move into Montgomery
+storage is an `astype` inside the trace. That boundary costs nothing
+measurable: `testing/ladder_bench.py` prices it against host-entered
+Montgomery material and the two track each other. Run that bench after a frx
+pin bump — it is what would catch the convert falling out of the ladder's
+`fori_loop` fusion, and nothing runs it automatically.
 
 The functions every consumer needs are `x25519` and `public_key` (the ladder
 at the basepoint 9). DHKEM(X25519, HKDF-SHA256) — the `Kem` seam wrapper RFC
@@ -20,18 +34,20 @@ from __future__ import annotations
 import frx
 import frx.numpy as fnp
 import numpy as np
+import zk_dtypes
 from frx import Array
 from frx.typing import ArrayLike
 
-from enc_frx.x25519 import field
-
 KEY_SIZE = 32
 
-# a24 = (486662 - 2) / 4 for curve25519, encoded as bytes so it enters the
-# field through `from_bytes` like every other value — the limb layout stays
-# field.py's own business, and a radix change there cannot strand a hand-laid
-# constant here.
-_A24_BYTES = np.frombuffer((121665).to_bytes(KEY_SIZE, "little"), dtype=np.uint8)
+# Canonical storage is the RFC's little-endian encoding, so bytes cross into
+# WIRE as a view; WORK is where the multiply is fast, an `astype` away.
+WIRE = np.dtype(zk_dtypes.curve25519_bf)
+WORK = np.dtype(zk_dtypes.curve25519_bf_mont)
+
+# a24 = (486662 - 2) / 4 for curve25519. A plain integer: the limb layout that
+# once forced this through a 32-byte round-trip is gone.
+_A24 = 121665
 
 
 def _clamp(scalar: Array) -> Array:
@@ -50,76 +66,120 @@ def _clamp(scalar: Array) -> Array:
 def _scalar_bits(scalar: Array) -> Array:
     """Clamped scalar bytes `[B, 32]` -> bits `[B, 255]`, bit `t` at index
     `t` — laid out ahead of the ladder so each iteration is one dynamic
-    slice rather than byte arithmetic."""
+    slice rather than byte arithmetic.
+
+    Bool rather than uint32: the only consumer is the ladder's `where`, so
+    converting here does it once on `[B, 255]` instead of once per iteration
+    on the slice.
+    """
     positions = np.arange(255)
     selected = scalar[..., positions // 8].astype(fnp.uint32)
     shifts = (positions % 8).astype(np.uint32)
-    return (selected >> shifts) & np.uint32(1)
+    return ((selected >> shifts) & np.uint32(1)).astype(bool)
 
 
 def _cswap(swap: Array, left: Array, right: Array) -> tuple[Array, Array]:
-    """Swap the two field elements where `swap` (uint32 `[B, 1]`) is 1 —
-    an XOR mask, the RFC's own formulation."""
-    mask = fnp.uint32(0) - swap
-    delta = (left ^ right) & mask
-    return left ^ delta, right ^ delta
+    """Swap the two field elements where `swap` (bool `[..., 1]`) is set.
+
+    `where`, not the RFC's XOR mask: a bitwise op on a field dtype is a type
+    error, correctly — an element is a value, not a bit pattern.
+    """
+    return fnp.where(swap, right, left), fnp.where(swap, left, right)
 
 
 def _ladder_step(index: Array, carry: tuple[Array, ...]) -> tuple[Array, ...]:
-    """One RFC 7748 §5 ladder iteration. The loop-invariants (`bits`, `x1`,
+    """One RFC 7748 §5 ladder iteration. The loop-invariants (`cond`, `x1`,
     `a24`) ride the carry — where they cost nothing — instead of being closed
     over, because frx keys the loop-body lowering cache on the body function's
     identity (the gotcha `aes/ghash._absorb` measured): a closure minted per
-    `x25519` call would re-trace this ~10-multiply body every call."""
-    x2, z2, x3, z3, swap, bits, x1, a24 = carry
-    bit = frx.lax.dynamic_slice_in_dim(bits, 254 - index, 1, axis=-1)
-    swap = swap ^ bit
+    `x25519` call would re-trace this ~10-multiply body every call.
+    """
+    x2, z2, x3, z3, cond, x1, a24 = carry
+    swap = frx.lax.dynamic_slice_in_dim(cond, 254 - index, 1, axis=-1)
     x2, x3 = _cswap(swap, x2, x3)
     z2, z3 = _cswap(swap, z2, z3)
-    swap = bit
 
-    a = field.add(x2, z2)
-    aa = field.square(a)
-    b = field.sub(x2, z2)
-    bb = field.square(b)
-    e = field.sub(aa, bb)
-    c = field.add(x3, z3)
-    d = field.sub(x3, z3)
-    da = field.mul(d, a)
-    cb = field.mul(c, b)
-    x3 = field.square(field.add(da, cb))
-    z3 = field.mul(x1, field.square(field.sub(da, cb)))
-    x2 = field.mul(aa, bb)
-    z2 = field.mul(e, field.add(aa, field.mul(a24, e)))
-    return (x2, z2, x3, z3, swap, bits, x1, a24)
+    a = x2 + z2
+    aa = a * a
+    b = x2 - z2
+    bb = b * b
+    e = aa - bb
+    c = x3 + z3
+    d = x3 - z3
+    da = d * a
+    cb = c * b
+    t = da + cb
+    x3 = t * t
+    s = da - cb
+    z3 = x1 * (s * s)
+    x2 = aa * bb
+    z2 = e * (aa + a24 * e)
+    return (x2, z2, x3, z3, cond, x1, a24)
+
+
+def _swap_conditions(bits: Array) -> Array:
+    """The RFC's running `swap ^= k_t`, solved in closed form.
+
+    §5's ladder carries a `swap` bit and XORs each scalar bit into it, so the
+    condition at step `t` is `k_t ^ k_{t+1}` (with `k_255 = 0`) — a function of
+    the scalar alone. Computing it here rather than in the body is not just
+    tidier: keeping the XOR inside makes the sliced bit a *loop output*, which
+    XLA cannot fuse into the body and so emits as its own kernel per iteration.
+    Hoisting it takes the GPU body from 5 kernels an iteration to 2 on the
+    unbatched shape: 4.17ms -> 1.73ms at B = 1, 2.33ms -> 1.84ms at B = 8192.
+    CPU is unaffected — the cost is a fusion boundary, not arithmetic.
+    """
+    tail = fnp.zeros((*bits.shape[:-1], 1), dtype=bool)
+    return bits ^ fnp.concatenate([bits[..., 1:], tail], axis=-1)
+
+
+def _ladder(bits: Array, x1: Array) -> Array:
+    """The RFC 7748 §5 ladder proper: the scalar's bits and the field-typed
+    u-coordinate in, the recovered `x2/z2` field element out.
+
+    Split out of `x25519` so a caller that already holds field material can
+    drive the ladder without the byte boundary around it — which is what lets
+    `testing/ladder_bench.py` measure that boundary rather than
+    re-implementing the body to compare against. Everything else the ladder
+    needs is a curve constant, taken from `x1`'s dtype and shape rather than
+    passed, so there is one correct way to build them and it lives here.
+    """
+    zero = fnp.zeros(x1.shape, dtype=x1.dtype)
+    one = fnp.ones(x1.shape, dtype=x1.dtype)
+    # a24 is read, never written, so it stays one element rather than riding
+    # the loop carry at full batch width — worth 2-4% on CUDA.
+    a24 = fnp.full((1,), _A24, dtype=x1.dtype)
+
+    x2, z2 = one, zero
+    x3, z3 = x1, one
+    x2, z2, x3, z3, _, _, _ = frx.lax.fori_loop(
+        0, 255, _ladder_step, (x2, z2, x3, z3, _swap_conditions(bits), x1, a24)
+    )
+    # The loop leaves `swap` equal to the scalar's low bit, so that is the
+    # condition for the final exchange.
+    x2, _ = _cswap(bits[..., 0:1], x2, x3)
+    z2, _ = _cswap(bits[..., 0:1], z2, z3)
+    # Field division, not a hand-rolled p-2 addition chain: the dtype carries
+    # its own inversion, and it is ~4x faster than the 254 squarings were.
+    return x2 / z2
 
 
 def x25519(scalar: ArrayLike, u: ArrayLike) -> Array:
     """RFC 7748 X25519: uint8 `[B, 32]` scalars x u-coordinates -> uint8
-    `[B, 32]` outputs, little-endian, per batch entry."""
+    `[B, 32]` outputs, little-endian, per batch entry.
+
+    A bare `[32]` is the empty batch and works the same — `keygen` is
+    unbatched per the seam rule, so `dhkem` arrives that way.
+    """
     scalar = fnp.asarray(scalar, dtype=fnp.uint8)
     u = fnp.asarray(u, dtype=fnp.uint8)
-    batch = scalar.shape[:-1]
 
     bits = _scalar_bits(_clamp(scalar))
     # §5 decodeUCoordinate: mask the top bit; the value is used unreduced.
-    x1 = field.from_bytes(
-        fnp.concatenate([u[..., :31], u[..., 31:] & np.uint8(127)], axis=-1)
-    )
+    x1 = fnp.concatenate([u[..., :31], u[..., 31:] & np.uint8(127)], axis=-1)
+    x1 = x1.view(WIRE).astype(WORK)
 
-    a24 = field.from_bytes(
-        fnp.broadcast_to(fnp.asarray(_A24_BYTES), (*batch, KEY_SIZE))
-    )
-    x2, z2 = field.one(batch), field.zero(batch)
-    x3, z3 = x1, field.one(batch)
-    swap = fnp.zeros((*batch, 1), dtype=fnp.uint32)
-
-    x2, z2, x3, z3, swap, _, _, _ = frx.lax.fori_loop(
-        0, 255, _ladder_step, (x2, z2, x3, z3, swap, bits, x1, a24)
-    )
-    x2, _ = _cswap(swap, x2, x3)
-    z2, _ = _cswap(swap, z2, z3)
-    return field.to_bytes(field.mul(x2, field.invert(z2)))
+    return _ladder(bits, x1).astype(WIRE).view(fnp.uint8)
 
 
 def basepoint(batch: tuple[int, ...] = (1,)) -> Array:

@@ -1,60 +1,85 @@
 # Copyright 2026 The enc-frx Authors. SPDX-License-Identifier: Apache-2.0
-"""What the uint32 limb field costs against the registered curve25519 dtype.
+"""What the traced byte boundary costs the X25519 ladder.
 
-`field.py` spells GF(2^255 - 19) out in 16-bit limbs because no registered
-field existed when it was written. The pinned stack now registers
-`zk_dtypes.curve25519_bf`, whose arithmetic lowers to frxlib's native prime
-field kernels — so the layout is a choice again, and this holds the two to a
-number before anyone rewrites anything. Both arms run the identical RFC 7748
-ladder — same 255 iterations, same operation schedule, same inversion chain —
-so the comparison is only about how a field element is carried and multiplied.
+`x25519.py` runs the RFC 7748 ladder over `zk_dtypes.curve25519_bf_mont`.
+RFC bytes are the canonical storage of `curve25519_bf`, so they cross into the
+trace as a free `view` and reach Montgomery storage by an `astype` — a
+boundary that sits *inside* the compiled function, and is therefore something
+the compiler can either fuse away or not.
 
-Four arms, because the dtype comes in two storage forms and the boundary
-between them is its own question:
+Two arms, sharing `x25519._ladder` rather than re-implementing it, so the only
+difference between them is where the field material comes from:
 
-- **limb** — `x25519.x25519` as shipped, bytes in, bytes out.
-- **dtype bf** — the ladder over `curve25519_bf`, whose storage is the
-  canonical little-endian encoding, so RFC bytes enter and leave the trace as
-  a free `view`. The conditional swap is `where` — bitwise masks are type
-  errors on field dtypes, correctly.
-- **dtype mont** — the same ladder over `curve25519_bf_mont`. Montgomery
-  storage is where the fast multiply lives; elements enter and leave this arm
-  as host material, so its rows price the ladder alone, without the byte
-  boundary every other arm includes — the kernel ceiling, not a deployable
-  path.
-- **dtype mont wire** — the deployable form of the mont arm: RFC bytes cross
-  as `view(bf)`, the variant convert (`astype`) moves them into Montgomery
-  storage inside the trace, and the result crosses back the same way. This is
-  the arm a `field.py` swap would actually ship, so it is the one the decision
-  reads. It builds on both legs; on wheels before
-  frx 0.10.2.dev20260822060712 the CUDA leg could not compile it, so the bench
-  drops this arm rather than aborting when the convert refuses to lower.
+- **mont** — field elements built on the host and handed straight to
+  `x25519._ladder`. No boundary at all: the kernel ceiling.
+- **wire** — `x25519.x25519` exactly as shipped, bytes in and bytes out, so
+  its rows are that ceiling plus the two converts *and* the scalar-bit
+  expansion, which `_mont_material` does eagerly for the other arm. The
+  asymmetry charges wire for work mont skips, so a ratio at 1.0 is a
+  conservative reading of the boundary rather than a flattering one.
 
-Every arm is verified against the RFC 7748 §5.2 vectors and against `field`'s
-own output before its first timed row; a fast arm that computes the wrong
-function has no row to show.
+**`wire / mont` is the number this bench exists for, and it should stay near
+1.0.** If a future pin stops fusing the variant convert into the ladder's
+`fori_loop`, this is where it shows up as a number rather than as a slowdown
+nobody attributes — but note nothing runs this automatically (it is a
+`py_binary`, and CI builds it without executing it), so the check happens
+when someone runs it.
 
-## Where the decision stands
+## What it measures now
 
-**Speed says swap; correctness says not yet, so `field.py` stays.**
+frx 0.10.2.dev20260823002126, RTX 5090 + Ryzen 9 9950X:
 
-On the current pin every arm builds on both legs and the deployable wire arm
-beats the limb field by 5.6-27x on CUDA and 17-58x on CPU, tracking the
-host-entered mont ceiling to within ~2% — so the traced byte boundary is free
-and "faster on both legs" passes at every batch size. The bf arm is not the
-candidate: it loses to the limb field on CPU at mid batch.
+```
+            CUDA                        CPU
+   B   mont     wire   ratio     mont     wire   ratio
+   1   1.72ms   1.73ms  1.01     0.09ms   0.10ms  1.16
+  32   1.71ms   1.73ms  1.01     1.79ms   1.76ms  0.98
+ 256   1.78ms   1.79ms  1.01    13.53ms  14.38ms  1.06
+1024   1.78ms   1.80ms  1.01    53.53ms  53.85ms  1.01
+8192   1.82ms   1.84ms  1.01   136.91ms 137.60ms  1.01
+```
 
-What blocks it: **`curve25519_bf_mont` multiply is wrong for roughly 1 operand
-pair in 200,000, always low by exactly 1** (fractalyze/xla#542, which carries a
-standalone reproducer). Identical on CPU and CUDA, so it is the field kernel,
-not an emitter; `curve25519_bf` computes the same products correctly. A ladder
-is ~2800 multiplies, so ~1.4% of X25519 calls would return a wrong shared
-secret. Fixed vectors cannot see that — the eight this bench checks all pass —
-which is why the retire is gated on RFC 7748 §5.2's *iterated* vector, where a
-dtype ladder diverges at iteration 82.
+The ratio is 1.0 on both legs across the sweep — the boundary is free, which
+is the whole claim. CUDA is flat from B = 1 (0.2us/op at 8192, dispatch floor
+0.030ms); CPU saturates around 53us/op and stops improving past B = 32.
 
-Earlier runs, and the emitter gap that used to block the CUDA arm
-(fractalyze/xla#573), are in this file's history.
+Read the ratio, not the millisecond: CPU rows move several percent run to run,
+and the B = 1 row is the arms' asymmetry rather than the boundary — the
+scalar-bit expansion is most of a 0.09ms ladder there, and nothing at that
+batch size is dispatch-bound enough to hide it.
+
+CUDA being flat from B = 1 is new, and it is what hoisting the RFC's running
+`swap ^= k_t` out of the loop bought (`x25519._swap_conditions`): the XOR made
+the sliced bit a loop output, which XLA emits as its own kernel per iteration
+rather than fusing. The unbatched row went 4.17ms -> 1.73ms and B = 8192 went
+2.33ms -> 1.84ms. CPU is unaffected, the cost being a GPU fusion boundary.
+
+## Why the limb field is gone
+
+It spelled GF(2^255 - 19) out in 16 limbs of radix 2^16 because no registered
+curve25519 field existed when it was written. Measured against it on
+frx 0.10.2.dev20260822060712 — the last wheel where both arms coexisted, this
+file's history has the four-arm table — the wire arm won 5.6-27x on CUDA and
+17-58x on CPU across B = 1..8192, tracking the mont ceiling to within ~2% on
+both legs. Those ratios are not reproducible from here, the limb arm having
+left with `field.py`; the ceiling-tracking half of the claim is, and is what
+the table above re-measures every run.
+
+Three upstream fixes had to land first, and the third is the one worth
+remembering. A convert between a field's storage forms had to stop being
+treated as a no-op (fractalyze/xla#568) and had to lower inside a
+`static_while` fusion rather than only standalone (fractalyze/xla#573) —
+before that, this arm did not compile on CUDA at all. Then
+`curve25519_bf_mont` multiply turned out to be **wrong for roughly 1 operand
+pair in 200,000, always low by exactly 1** (fractalyze/xla#542), which every
+fixed vector in this file passed while corrupting ~1.4% of X25519 calls; it
+was a multi-limb Montgomery reduction whose result bound could cross 2^256
+and lose the bit silently (fractalyze/prime-ir#434).
+
+That last one is why the retire is gated on RFC 7748 §5.2's *iterated* vector
+in `x25519_test`, not on the fixed vectors here. A bench verifies that an arm
+computes the right function before it earns a row; it is not the correctness
+gate, and for a rare-rate arithmetic fault it structurally cannot be.
 
 Run:
     bazel run //enc_frx/x25519/testing:ladder_bench
@@ -70,11 +95,10 @@ from typing import Any
 import frx
 import frx.numpy as fnp
 import numpy as np
-import zk_dtypes
 from absl import app, flags
 from frx import Array
 
-from enc_frx.x25519 import field, x25519
+from enc_frx.x25519 import x25519
 from enc_frx.x25519.testing import rfc7748_reference
 
 _BATCHES = flags.DEFINE_list(
@@ -88,8 +112,6 @@ _MUL_BATCH = flags.DEFINE_integer(
     "mul_batch", 1 << 16, "elements for the single-multiply rows; 0 skips them"
 )
 
-_BF = np.dtype(zk_dtypes.curve25519_bf)
-_MONT = np.dtype(zk_dtypes.curve25519_bf_mont)
 _P = 2**255 - 19
 
 # Seconds of real ladder work before the dispatch floor is timed — an unwarmed
@@ -98,137 +120,17 @@ _P = 2**255 - 19
 _FLOOR_WARMUP_S = 0.5
 
 
-def _dtype_ladder_step(index: Array, carry: tuple[Array, ...]) -> tuple[Array, ...]:
-    """One RFC 7748 §5 iteration over a field dtype — `x25519._ladder_step`
-    with the limb calls replaced by operators, and the XOR cswap by `where`.
-    Module-level for the loop-body lowering cache, as there."""
-    x2, z2, x3, z3, swap, bits, x1, a24 = carry
-    bit = frx.lax.dynamic_slice_in_dim(bits, 254 - index, 1, axis=-1)
-    swap = swap ^ bit
-    cond = swap.astype(bool)
-    x2, x3 = fnp.where(cond, x3, x2), fnp.where(cond, x2, x3)
-    z2, z3 = fnp.where(cond, z3, z2), fnp.where(cond, z2, z3)
-    swap = bit
-
-    a = x2 + z2
-    aa = a * a
-    b = x2 - z2
-    bb = b * b
-    e = aa - bb
-    c = x3 + z3
-    d = x3 - z3
-    da = d * a
-    cb = c * b
-    t = da + cb
-    x3 = t * t
-    s = da - cb
-    z3 = x1 * (s * s)
-    x2 = aa * bb
-    z2 = e * (aa + a24 * e)
-    return (x2, z2, x3, z3, swap, bits, x1, a24)
-
-
-def _square_step(_: Array, acc: Array) -> Array:
-    return acc * acc
-
-
-def _dtype_invert(element: Array) -> Array:
-    """`field.invert`'s 254-squaring chain for 2^255 - 21, over the dtype."""
-
-    def pow2k(value: Array, squarings: int) -> Array:
-        return frx.lax.fori_loop(0, squarings, _square_step, value)
-
-    z2 = element * element
-    z9 = pow2k(z2, 2) * element
-    z11 = z9 * z2
-    z_5_0 = (z11 * z11) * z9
-    z_10_0 = pow2k(z_5_0, 5) * z_5_0
-    z_20_0 = pow2k(z_10_0, 10) * z_10_0
-    z_40_0 = pow2k(z_20_0, 20) * z_20_0
-    z_50_0 = pow2k(z_40_0, 10) * z_10_0
-    z_100_0 = pow2k(z_50_0, 50) * z_50_0
-    z_200_0 = pow2k(z_100_0, 100) * z_100_0
-    z_250_0 = pow2k(z_200_0, 50) * z_50_0
-    return pow2k(z_250_0, 5) * z11
-
-
-def _dtype_ladder(bits: Array, x1: Array, a24: Array, one: Array, zero: Array) -> Array:
-    """The ladder body every dtype arm shares: bit array and field-typed
-    inputs in, the unencoded `x2/z2` field element out."""
-    x2, z2 = one, zero
-    x3, z3 = x1, one
-    swap = fnp.zeros((*x1.shape[:-1], 1), dtype=fnp.uint32)
-    x2, z2, x3, z3, swap, _, _, _ = frx.lax.fori_loop(
-        0, 255, _dtype_ladder_step, (x2, z2, x3, z3, swap, bits, x1, a24)
-    )
-    cond = swap.astype(bool)
-    x2 = fnp.where(cond, x3, x2)
-    z2 = fnp.where(cond, z3, z2)
-    return x2 * _dtype_invert(z2)
-
-
-def _constant(value: int, dtype: np.dtype, batch: tuple[int, ...]) -> Array:
-    return fnp.broadcast_to(fnp.asarray(np.array([[value]], dtype=dtype)), (*batch, 1))
-
-
-def _dtype_x25519(scalar: Array, u: Array, dtype: np.dtype) -> Array:
-    """X25519 over a field dtype, bytes in and bytes out. The bytes always
-    cross as a `view(_BF)` — canonical storage IS the RFC encoding — so a
-    non-`_BF` working dtype is reached by the variant convert on each side,
-    and the ladder in between is the same either way. One body rather than
-    one per arm, because "every arm runs the identical ladder" is the
-    premise the whole comparison rests on."""
-    batch = scalar.shape[:-1]
-    bits = x25519._scalar_bits(x25519._clamp(scalar))
-    x1 = fnp.concatenate([u[..., :31], u[..., 31:] & np.uint8(127)], axis=-1).view(_BF)
-    if dtype != _BF:
-        x1 = x1.astype(dtype)
-    result = _dtype_ladder(
-        bits,
-        x1,
-        _constant(121665, dtype, batch),
-        _constant(1, dtype, batch),
-        _constant(0, dtype, batch),
-    )
-    if dtype != _BF:
-        result = result.astype(_BF)
-    return result.view(fnp.uint8)
-
-
-def _bf_x25519(scalar: Array, u: Array) -> Array:
-    """The bf arm: canonical storage throughout, so the byte boundary is two
-    free views and the whole computation is one trace."""
-    return _dtype_x25519(scalar, u, _BF)
-
-
-def _mont_wire_x25519(scalar: Array, u: Array) -> Array:
-    """The mont arm with the wire boundary in the trace — the deployable form,
-    what a `field.py` swap would ship."""
-    return _dtype_x25519(scalar, u, _MONT)
-
-
-def _mont_material(
-    scalar: np.ndarray, u: np.ndarray
-) -> tuple[Array, Array, Array, Array, Array]:
-    """Host-side entry into Montgomery storage: clamp and mask as the RFC
-    says, then mint the field elements from integers. This is the boundary
-    the mont arm keeps off the device (module docstring), so everything here
-    stays outside the timed call."""
-    batch = scalar.shape[:-1]
+def _mont_material(scalar: np.ndarray, u: np.ndarray) -> tuple[Array, Array]:
+    """`x25519._ladder`'s arguments, built on the host — the ceiling arm's
+    inputs, with the byte boundary done in numpy instead of in the trace."""
     bits = x25519._scalar_bits(x25519._clamp(fnp.asarray(scalar)))
     masked = u.copy()
     masked[..., 31] &= 0x7F
     x1 = np.array(
-        [[int.from_bytes(bytes(row), "little")] for row in masked.reshape(-1, 32)],
-        dtype=_MONT,
-    ).reshape(*batch, 1)
-    return (
-        bits,
-        fnp.asarray(x1),
-        _constant(121665, _MONT, batch),
-        _constant(1, _MONT, batch),
-        _constant(0, _MONT, batch),
+        [[int.from_bytes(bytes(row), "little")] for row in masked],
+        dtype=x25519.WORK,
     )
+    return bits, fnp.asarray(x1)
 
 
 def _say(text: str) -> None:
@@ -258,14 +160,11 @@ def _time(fn: Callable[..., Any], *args: Any) -> tuple[float, float] | None:
     return max(cold - warm, 0.0), warm
 
 
-def _verify() -> bool:
-    """Every arm against RFC 7748 §5.2 and the limb field's own output.
-
-    Returns whether the mont-wire arm is available on this backend: the
-    variant convert inside the ladder's loop is an emitter gap on the CUDA
-    leg today, and a bench that aborted on it could not price the other
-    three arms there. The wire arm is skipped, loudly; the rest still
-    verify or die."""
+def _verify() -> None:
+    """Both arms against RFC 7748 §5.2 and six random vectors, before any
+    timed row — a fast arm that computes the wrong function has no row to
+    show. See the module docstring for why this is not the correctness gate.
+    """
     vectors = [
         (
             "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
@@ -287,24 +186,12 @@ def _verify() -> bool:
     )
     expect = [rfc7748_reference.x25519(bytes(k[i]), bytes(u[i])) for i in range(len(k))]
 
-    limb = np.asarray(frx.jit(x25519.x25519)(k, u))
-    bf = np.asarray(frx.jit(_bf_x25519)(fnp.asarray(k), fnp.asarray(u)))
-    mont = np.asarray(frx.jit(_dtype_ladder)(*_mont_material(k, u)))
-    try:
-        wire = np.asarray(frx.jit(_mont_wire_x25519)(fnp.asarray(k), fnp.asarray(u)))
-    except RuntimeError as error:
-        _say(f"mont wire arm unavailable here: {str(error).splitlines()[0][:96]}")
-        wire = None
+    wire = np.asarray(frx.jit(x25519.x25519)(k, u))
+    mont = np.asarray(frx.jit(x25519._ladder)(*_mont_material(k, u)))
     for i, want in enumerate(expect):
-        assert bytes(limb[i]) == want, f"limb wrong at row {i}"
-        assert bytes(bf[i]) == want, f"dtype bf wrong at row {i}"
-        got = int(mont[i, 0]).to_bytes(32, "little")
-        assert got == want, f"dtype mont wrong at row {i}"
-        if wire is not None:
-            assert bytes(wire[i]) == want, f"dtype mont wire wrong at row {i}"
-    arms = "all arms" if wire is not None else "limb, bf, mont"
-    _say(f"{arms} match RFC 7748 §5.2 + {len(k) - 2} random vectors")
-    return wire is not None
+        assert bytes(wire[i]) == want, f"wire wrong at row {i}"
+        assert int(mont[i, 0]).to_bytes(32, "little") == want, f"mont wrong at row {i}"
+    _say(f"both arms match RFC 7748 §5.2 + {len(k) - 2} random vectors")
 
 
 def _dispatch_floor() -> tuple[float, float] | None:
@@ -320,89 +207,55 @@ def _dispatch_floor() -> tuple[float, float] | None:
     return _time(lambda x: x + np.int32(1), fnp.asarray(np.zeros(1, dtype=np.int32)))
 
 
-def _sweep(batches: list[int], wire_available: bool) -> None:
+def _sweep(batches: list[int]) -> None:
     rng = np.random.default_rng(2)
     _say(
-        "\nx25519, four arms by batch size  "
-        "(mont rows price the ladder alone — no byte boundary; wire is mont "
-        "with the traced boundary, the deployable form)"
+        "\nx25519 by batch size  (mont = host-entered field material, the "
+        "ceiling; wire = the shipped path, boundary in the trace)"
     )
     _say(
-        f"  {'B':>6}  {'limb warm':>10}  {'bf warm':>10}  {'mont warm':>10}  "
-        f"{'wire warm':>10}  {'bf/limb':>8}  {'mont/limb':>9}  "
-        f"{'wire/limb':>9}  {'wire/op':>9}"
+        f"  {'B':>6}  {'mont warm':>10}  {'wire warm':>10}  "
+        f"{'wire/mont':>9}  {'wire/op':>9}"
     )
-    last: dict[str, tuple[float, float]] = {}
+    last: tuple[float, float] | None = None
     for batch in batches:
         k = rng.integers(0, 256, (batch, 32), dtype=np.uint8)
         u = rng.integers(0, 256, (batch, 32), dtype=np.uint8)
-        limb = _time(x25519.x25519, k, u)
-        bf = _time(_bf_x25519, fnp.asarray(k), fnp.asarray(u))
-        mont = _time(_dtype_ladder, *_mont_material(k, u))
-        wire = (
-            _time(_mont_wire_x25519, fnp.asarray(k), fnp.asarray(u))
-            if wire_available
-            else None
-        )
-        if limb is None or bf is None or mont is None:
+        mont = _time(x25519._ladder, *_mont_material(k, u))
+        wire = _time(x25519.x25519, k, u)
+        if mont is None or wire is None:
             _say(f"  {batch:>6}  (unavailable at this batch size)")
             continue
-        last = {"limb": limb, "bf": bf, "mont": mont}
-        if wire is not None:
-            last["wire"] = wire
-        # The three wire cells are the only optional ones; spelling them
-        # individually keeps the row in header order rather than splicing two
-        # whole-row variants together.
-        wire_ms = f"{wire[1] * 1e3:>8.2f}ms" if wire is not None else f"{'--':>10}"
-        wire_ratio = f"{wire[1] / limb[1]:>8.2f}x" if wire is not None else f"{'--':>9}"
-        wire_op = (
-            f"{wire[1] / batch * 1e6:>7.1f}us" if wire is not None else f"{'--':>9}"
-        )
+        last = (mont[0], wire[0])
         _say(
-            f"  {batch:>6}  {limb[1] * 1e3:>8.2f}ms  {bf[1] * 1e3:>8.2f}ms  "
-            f"{mont[1] * 1e3:>8.2f}ms  {wire_ms}  {bf[1] / limb[1]:>7.2f}x  "
-            f"{mont[1] / limb[1]:>8.2f}x  {wire_ratio}  {wire_op}"
+            f"  {batch:>6}  {mont[1] * 1e3:>8.2f}ms  {wire[1] * 1e3:>8.2f}ms  "
+            f"{wire[1] / mont[1]:>8.2f}x  {wire[1] / batch * 1e6:>7.1f}us"
         )
     if last:
         _say(
-            "  compile, at the largest measured B: "
-            + ", ".join(f"{name} {t[0]:.2f}s" for name, t in last.items())
+            f"  compile, at the largest measured B: "
+            f"mont {last[0]:.2f}s, wire {last[1]:.2f}s"
         )
 
 
 def _single_multiply(count: int) -> None:
-    """One field multiply over `count` elements, per layout — the ratio the
-    ladder rows are made of, without the ladder around it."""
+    """One field multiply over `count` elements, per storage form — the
+    operation the ladder rows are made of, without the ladder around it.
+
+    The `bf` row earns its place by being the only thing that measures
+    `x25519.py`'s claim that Montgomery storage is where the fast multiply
+    lives. No arm of the sweep runs `bf`; the ladder only ever sees `WORK`.
+    """
     rng = np.random.default_rng(3)
     values = [
         int.from_bytes(bytes(row), "little") % _P
         for row in rng.integers(0, 256, (2 * count, 32), dtype=np.uint8)
     ]
-    limb_all = field.from_bytes(
-        fnp.asarray(
-            np.frombuffer(
-                b"".join(v.to_bytes(32, "little") for v in values), dtype=np.uint8
-            ).reshape(2 * count, 32)
-        )
-    )
-    rows = [
-        ("limb", field.mul, limb_all[:count], limb_all[count:]),
-        (
-            "bf",
-            lambda x, y: x * y,
-            fnp.asarray(np.array(values[:count], dtype=_BF)),
-            fnp.asarray(np.array(values[count:], dtype=_BF)),
-        ),
-        (
-            "mont",
-            lambda x, y: x * y,
-            fnp.asarray(np.array(values[:count], dtype=_MONT)),
-            fnp.asarray(np.array(values[count:], dtype=_MONT)),
-        ),
-    ]
     _say(f"\none multiply over {count} elements")
-    for name, fn, left, right in rows:
-        timing = _time(fn, left, right)
+    for name, dtype in (("bf", x25519.WIRE), ("mont", x25519.WORK)):
+        left = fnp.asarray(np.array(values[:count], dtype=dtype))
+        right = fnp.asarray(np.array(values[count:], dtype=dtype))
+        timing = _time(lambda x, y: x * y, left, right)
         if timing is None:
             continue
         _say(
@@ -414,13 +267,13 @@ def _single_multiply(count: int) -> None:
 def main(argv: list[str]) -> None:
     del argv
     _say(f"backend={frx.default_backend()}  devices={frx.devices()}")
-    wire_available = _verify()
+    _verify()
     floor = _dispatch_floor()
     if floor is not None:
         _say(f"dispatch floor: {floor[1] * 1e3:.3f}ms warm")
     if _MUL_BATCH.value:
         _single_multiply(_MUL_BATCH.value)
-    _sweep([int(b) for b in _BATCHES.value], wire_available)
+    _sweep([int(b) for b in _BATCHES.value])
 
 
 if __name__ == "__main__":

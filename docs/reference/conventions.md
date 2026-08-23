@@ -60,24 +60,53 @@ A fused kernel is available either way and is not an argument for moving code:
 zorch already emits it for sumcheck and jagged regions, not only for hashes. What
 `hash-frx` owns is the marker seam, not every marker.
 
-## There is no 64-bit integer lane
+## Reach for a registered field before hand-rolling one
 
 FRX runs with x64 disabled, so a `uint64` request is **silently truncated to
 `uint32`** — a warning, not an error, which means an implementation written
-against 64-bit limbs runs and returns wrong numbers. `zk_dtypes` widths do not
-help: `uint128` is a host dtype that no traced array can hold, unlike the binary
-fields, which are registered in the frontend.
-
-So multi-precision arithmetic keeps every intermediate under 2^32 by
-construction, since overflow is silent corruption rather than an error. A product
+against 64-bit limbs runs and returns wrong numbers. Carry a field in integer
+lanes and every intermediate has to stay under 2^32 by construction: a product
 must fit in 32 bits, which caps limbs at 16 bits and rules out the layouts most
 reference implementations use.
 
-Two rules follow. A limb layout **states its accumulator bound** where the layout
-is defined, and a test asserts it so a later change to the radix trips. And a
-layout whose margin rests on that bound is gated by a **differential test against
-Python's arbitrary-precision integers**, over extreme inputs as well as random
-ones — a published vector set never approaches the worst case.
+**So do not carry a field in integer lanes.** `zk_dtypes` registers fields in
+the frontend, traced arrays hold them, and
+`zk_dtypes.prime_field(modulus, "std" | "mont")` mints one for **any** modulus —
+not just the curated curves. Binary fields likewise
+(`binary_field_gf8_aes`, `binary_field_ghash`). The arithmetic rides the normal
+operators, inversion and division included; note that `dir(zk_dtypes)` lists
+dtype *constructors*, so grepping it for `inverse` finds nothing and proves
+nothing. Build an array and try the operator.
+
+Two schemes here were written before their field was registered and both have
+since been migrated, each losing a limb layout and getting faster doing it —
+`x25519/x25519.py` (16 limbs of radix 2^16, retired) and `chacha/poly1305.py`
+(ten of radix 2^13). Read the first as the worked example: the wire encoding of
+a field element is usually its canonical storage, so bytes cross in with `view`
+and reach Montgomery storage with `astype`, and the pair is conventionally named
+`WIRE` / `WORK`.
+
+**When no registered field fits**, the old rules still apply. A limb layout
+**states its accumulator bound** where the layout is defined, and a test asserts
+it so a later change to the radix trips. And a layout whose margin rests on that
+bound is gated by a **differential test against Python's arbitrary-precision
+integers**, over extreme inputs as well as random ones — a published vector set
+never approaches the worst case.
+
+## A chained vector is the only gate a rare-rate fault cannot pass
+
+A scheme built on a substrate it did not write inherits that substrate's faults,
+and the dangerous ones are rare rather than loud. A field multiply wrong for one
+operand pair in 200,000 passes every published vector and still corrupts a
+percent of calls, because a single primitive is a few thousand multiplies and no
+single multiply is likely to be the wrong one.
+
+Fixed vectors structurally cannot see that. **Iterated or chained vectors can**,
+because the error compounds: X25519's ladder over a registered field passed RFC
+7748 §5.2's fixed vectors, six random ones, and eight more in a bench, then
+diverged at iteration 82 of §5.2's *iterated* vector (fractalyze/xla#542). So
+when a spec offers a chained vector, that is the gate — run it, and say in the
+test why it is the one that matters.
 
 ## Failure is a value, and the two seams disagree on purpose
 

@@ -28,11 +28,24 @@ Three choices are this repo's:
 - **§7.1.4's all-zero abort is not performed.** The seam has no failure
   channel by design; what that costs and who owes the check instead is below.
 
-The curve arithmetic is the uint32 limb field
-([`field.py`](../../enc_frx/x25519/field.py)) — the no-64-bit-lane layout —
-with the registered `curve25519_bf` dtype benchmarked against it and the swap
-criterion recorded in
-[`ladder_bench.py`](../../enc_frx/x25519/testing/ladder_bench.py).
+The curve arithmetic is the registered `zk_dtypes.curve25519_bf` field, worked
+in its Montgomery storage variant `curve25519_bf_mont` where the fast multiply
+lives. RFC bytes *are* that field's canonical storage, so they cross into the
+trace as a free `view` and reach Montgomery storage by an `astype` inside the
+trace; [`ladder_bench.py`](../../enc_frx/x25519/testing/ladder_bench.py) prices
+that boundary against host-entered material and exists to keep it free.
+
+This replaced a hand-rolled uint32 limb field (16 limbs of radix 2^16, the
+no-64-bit-lane layout) that predated the dtype's registration — the dtype path
+measured 5.6-27x faster on CUDA and 17-58x on CPU on the last wheel where both
+existed, a comparison the bench can no longer reproduce now that the limb arm
+is gone with `field.py`. Note what the swap required
+beyond speed: a rare-rate fault in the Montgomery multiply
+(fractalyze/xla#542 — 1 pair in 200,000, always low by exactly 1) passed every
+fixed vector while corrupting ~1.4% of calls, so the gate is RFC 7748 §5.2's
+*iterated* vector, not its fixed ones. See
+[`ladder_bench.py`](../../enc_frx/x25519/testing/ladder_bench.py) for that
+history.
 
 ## Where the batch axis is
 

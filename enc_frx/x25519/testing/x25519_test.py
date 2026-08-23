@@ -7,6 +7,14 @@ The iterated vector is the one that catches accumulated drift: a wrong carry
 that survives one ladder is amplified through a thousand. The RFC's
 million-iteration row is deliberately absent — it adds hours, not coverage,
 over the thousand-iteration row.
+
+That amplification is not a nicety, it is the only detector for a whole class
+of fault. A field multiply wrong for 1 operand pair in 200,000 corrupts ~1.4%
+of X25519 calls — a ladder is ~2800 multiplies — while passing every fixed
+vector above, because any *single* multiply is right 99.999% of the time.
+Exactly that shipped once (fractalyze/xla#542) and surfaced here at iteration
+82. Fixed vectors cannot see a rare-rate arithmetic bug; chained ones can, and
+that is why this test gates the field substrate.
 """
 
 from __future__ import annotations
@@ -95,6 +103,22 @@ class X25519Test(absltest.TestCase):
         eager = np.asarray(x.x25519(scalars, coords))
         traced = np.asarray(frx.jit(x.x25519)(scalars, coords))
         np.testing.assert_array_equal(traced, eager)
+
+    def test_unbatched_input(self) -> None:
+        """A bare `[32]` scalar, the empty batch. `keygen` is unbatched per the
+        seam rule, so `dhkem` reaches the ladder this way and every field
+        constant has to broadcast to `(1,)` rather than `(B, 1)` — a shape the
+        batched cases above cannot distinguish."""
+        rng = np.random.default_rng(2)
+        scalar = rng.integers(0, 256, size=(32,), dtype=np.uint8)
+        coord = rng.integers(0, 256, size=(32,), dtype=np.uint8)
+        got = np.asarray(x.x25519(scalar, coord))
+        self.assertEqual(got.shape, (32,))
+        self.assertEqual(bytes(got), ref.x25519(bytes(scalar), bytes(coord)))
+        self.assertEqual(
+            bytes(np.asarray(x.public_key(scalar))),
+            ref.x25519(bytes(scalar), bytes(np.asarray(x.basepoint(())))),
+        )
 
 
 if __name__ == "__main__":
