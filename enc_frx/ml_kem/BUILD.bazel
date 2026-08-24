@@ -39,8 +39,9 @@ py_library(
     ],
 )
 
-# The only target that names Keccak. Every scheme-level hash reaches it through
-# @hash_frx's ByteHash seam, so a second copy of SHA-3 cannot appear here.
+# The package's whole hash surface. Every scheme-level hash reaches Keccak
+# through @hash_frx's ByteHash seam, so a second copy of SHA-3 cannot appear
+# here, and no sibling target needs its own hash dependency.
 py_library(
     name = "hashes",
     srcs = [
@@ -50,7 +51,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":params",
-        "@hash_frx//hash_frx/keccak",
+        "@hash_frx//hash_frx",
         requirement("frx"),
         requirement("numpy"),
     ],

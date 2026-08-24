@@ -73,12 +73,10 @@ fails at runtime, past a green analysis. hash-frx re-layers itself — `hmac`,
 that had spelled the layout — and the root re-exports exist so that costs us
 nothing. They are lazy, so the dep buys insulation rather than import time.
 
-The exception is a name hash-frx does not re-export, which today is
-`SHAKE128_RATE` alone: [`ml_kem/hashes.py`](../../enc_frx/ml_kem/hashes.py)
-keeps one layout import and its narrow `//hash_frx/keccak` dep for it. Convert a
-module wholesale or not at all — splitting its names across both spellings
-leaves the same fragility and two imports to read. When a needed name is
-missing from the root, the fix worth pursuing is upstream.
+A name the root does not re-export is an upstream fix to pursue, not a carve-out
+to keep here. Until one lands, convert a module wholesale or not at all:
+splitting its names across both spellings leaves the same coupling and two
+imports to read.
 
 ## Reach for a registered field before hand-rolling one
 

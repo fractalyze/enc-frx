@@ -25,25 +25,14 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-
-# The one layout import left in the repo, and deliberately whole: everything
-# else takes hash-frx's names off the package root so a re-layering there cannot
-# reach us. `SHAKE128_RATE` is not root-exported, and splitting the five names
-# across both spellings would buy nothing — the fragility is per-module, not
-# per-name. Reads as one import until hash-frx exports the rate.
-from hash_frx.keccak.byte_hashes import (
-    SHAKE128_RATE,
-    Sha3_256,
-    Sha3_512,
-    Shake128,
-    Shake256,
-)
+from hash_frx import SHAKE128_RATE, Sha3_256, Sha3_512, Shake128, Shake256
 
 from enc_frx.ml_kem.params import SEED_SIZE
 
 # Re-exported rather than restated: `sampling.py` sizes its XOF budget in whole
 # SHAKE128 blocks and must not carry a second copy of the rate. This module is
-# the one place that names Keccak, so it is where the number crosses.
+# the package's whole hash surface, so the number crosses here and `:sampling`
+# needs no hash-frx dependency of its own.
 XOF_RATE = SHAKE128_RATE
 
 # FIPS 203 §4.1: `PRF_eta(s, b)` squeezes `64*eta` bytes, and `eta` is 2 or 3.
