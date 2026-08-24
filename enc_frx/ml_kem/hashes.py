@@ -25,6 +25,12 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
+
+# The one layout import left in the repo, and deliberately whole: everything
+# else takes hash-frx's names off the package root so a re-layering there cannot
+# reach us. `SHAKE128_RATE` is not root-exported, and splitting the five names
+# across both spellings would buy nothing — the fragility is per-module, not
+# per-name. Reads as one import until hash-frx exports the rate.
 from hash_frx.keccak.byte_hashes import (
     SHAKE128_RATE,
     Sha3_256,

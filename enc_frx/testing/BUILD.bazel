@@ -20,8 +20,6 @@ py_test(
     srcs = ["hash_frx_dep_test.py"],
     deps = [
         "@hash_frx//hash_frx",
-        "@hash_frx//hash_frx:byte_hash",
-        "@hash_frx//hash_frx:sha256",
         requirement("absl_py"),
         requirement("frx"),
         requirement("numpy"),

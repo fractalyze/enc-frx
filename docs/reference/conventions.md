@@ -60,6 +60,23 @@ A fused kernel is available either way and is not an argument for moving code:
 zorch already emits it for sumcheck and jagged regions, not only for hashes. What
 `hash-frx` owns is the marker seam, not every marker.
 
+**Take its names off the package root, not out of its file tree.** `from
+hash_frx import Sha256`, never `from hash_frx.sha256 import Sha256`, and the
+Bazel dep is the whole `@hash_frx//hash_frx` rather than a narrow label. The two
+go together: `hash_frx/__init__.py` ships only in that target, so narrow deps
+leave `hash_frx` a namespace package with no `__getattr__` and the root import
+fails at runtime, past a green analysis. hash-frx re-layers itself — `hmac`,
+`hkdf` and `pbkdf2` moved under `adapter/` once already, breaking every consumer
+that had spelled the layout — and the root re-exports exist so that costs us
+nothing. They are lazy, so the dep buys insulation rather than import time.
+
+The exception is a name hash-frx does not re-export, which today is
+`SHAKE128_RATE` alone: [`ml_kem/hashes.py`](../../enc_frx/ml_kem/hashes.py)
+keeps one layout import and its narrow `//hash_frx/keccak` dep for it. Convert a
+module wholesale or not at all — splitting its names across both spellings
+leaves the same fragility and two imports to read. When a needed name is
+missing from the root, the fix worth pursuing is upstream.
+
 ## Reach for a registered field before hand-rolling one
 
 FRX runs with x64 disabled, so a `uint64` request is **silently truncated to
