@@ -60,6 +60,15 @@ class Poly1305DifferentialTest(parameterized.TestCase):
         ("ragged_tail", 70),
     )
     def test_random_inputs_match_exact_arithmetic(self, length: int) -> None:
+        # Eight separate `B = 1` calls rather than one `B = 8` call, and that is
+        # deliberate: compilation is what this costs, and batching does not
+        # remove any. A first call at a shape runs 8-544ms against ~2ms for a
+        # repeat at that same shape, and the six lengths are six distinct shapes
+        # either way — they straddle the block boundary on purpose, so they do
+        # not collapse into one batch. So batching buys the 42 repeats, ~90ms of
+        # a ~1.3s test, and gives it back at the compiler: summed over the six
+        # shapes the `B = 8` graphs cost 1226ms to build against 1135ms for the
+        # `B = 1` ones. `Poly1305BatchTest` is what covers the batch axis.
         rng = np.random.default_rng(length)
         for _ in range(8):
             key = bytes(rng.integers(0, 256, poly1305.KEY_SIZE, dtype=np.uint8))

@@ -6,7 +6,10 @@ This page carries only what is specific to implementing encryption schemes. The
 rules every FRX consumer shares — `@jit` placement, `for` vs `lax.scan` vs
 `vmap`, pytree registration mechanics, seam conformance pins, the `testing/`
 layout, the comment rules — are not repeated here. They are identical in every
-repo built on FRX, and a copy per repo is exactly how they drift apart.
+repo built on FRX, and a copy per repo is exactly how they drift apart; read
+them in
+[`zorch`'s page](https://github.com/fractalyze/zorch/blob/main/docs/reference/conventions.md),
+which states them in full.
 
 ## The batch is the compilation unit
 
