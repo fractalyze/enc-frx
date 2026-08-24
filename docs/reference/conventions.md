@@ -65,18 +65,12 @@ zorch already emits it for sumcheck and jagged regions, not only for hashes. Wha
 
 **Take its names off the package root, not out of its file tree.** `from
 hash_frx import Sha256`, never `from hash_frx.sha256 import Sha256`, and the
-Bazel dep is the whole `@hash_frx//hash_frx` rather than a narrow label. The two
-go together: `hash_frx/__init__.py` ships only in that target, so narrow deps
-leave `hash_frx` a namespace package with no `__getattr__` and the root import
-fails at runtime, past a green analysis. hash-frx re-layers itself — `hmac`,
-`hkdf` and `pbkdf2` moved under `adapter/` once already, breaking every consumer
-that had spelled the layout — and the root re-exports exist so that costs us
-nothing. They are lazy, so the dep buys insulation rather than import time.
-
-A name the root does not re-export is an upstream fix to pursue, not a carve-out
-to keep here. Until one lands, convert a module wholesale or not at all:
-splitting its names across both spellings leaves the same coupling and two
-imports to read.
+Bazel dep is the whole `@hash_frx//hash_frx` rather than a narrow label — the two
+are one decision, and hash-frx's
+[consuming page](https://github.com/fractalyze/hash-frx/blob/main/docs/reference/consuming.md)
+states why, along with what to do about a name its root does not export. The
+`hash-frx-root-import` and `hash-frx-whole-package-dep` hooks hold both halves,
+so the rule is here as context rather than as the thing that enforces it.
 
 ## Reach for a registered field before hand-rolling one
 
