@@ -54,9 +54,7 @@ import frx.numpy as fnp
 import numpy as np
 from frx import Array
 from frx.typing import ArrayLike
-from hash_frx.hkdf import hkdf_expand, hkdf_extract
-from hash_frx.hmac import Hmac
-from hash_frx.sha256 import Sha256
+from hash_frx import Hmac, Sha256, hkdf_expand, hkdf_extract
 
 from enc_frx.kem import Kem
 from enc_frx.x25519 import x25519 as x
@@ -67,17 +65,12 @@ _KEM_ID = 0x0020  # RFC 9180 §7.1, Table 2
 _SUITE_ID = b"KEM" + _KEM_ID.to_bytes(2, "big")  # §4: "KEM" ‖ I2OSP(kem_id, 2)
 _VERSION = b"HPKE-v1"
 
-# FIPS 180-4's SHA-256 block size — HMAC's `B` parameter. hash-frx keeps it off
-# the ByteHash seam on purpose (BLAKE3 has none), so the construction that keys
-# SHA-256 states it.
-_SHA256_BLOCK_SIZE = 64
-
 
 def _mac() -> Hmac:
     """HMAC-SHA256, built per call — hash-frx's rule: `Sha256()` reads its
     emitter routing at construction, and an instance hoisted to import time
     would pin that answer before anything could vary it."""
-    return Hmac(Sha256(), _SHA256_BLOCK_SIZE)
+    return Hmac(Sha256())
 
 
 def _prefix(data: bytes, batch: tuple[int, ...]) -> Array:

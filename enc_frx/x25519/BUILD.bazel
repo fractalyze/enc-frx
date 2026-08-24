@@ -29,9 +29,7 @@ py_library(
     deps = [
         ":x25519",
         "//enc_frx:kem",
-        "@hash_frx//hash_frx:hkdf",
-        "@hash_frx//hash_frx:hmac",
-        "@hash_frx//hash_frx:sha256",
+        "@hash_frx//hash_frx",
         requirement("frx"),
         requirement("numpy"),
     ],
