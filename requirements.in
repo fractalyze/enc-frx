@@ -40,8 +40,8 @@
 # Held at 0.0.16, the release this repo has been tested against.
 absl-py
 numpy
-frx==0.10.2.dev20260825083624
-frxlib==0.10.2.dev20260825083624
-frx-cuda12-pjrt==0.10.2.dev20260825083624
-frx-cuda12-plugin==0.10.2.dev20260825083624
+frx==0.10.2.dev20260828160853
+frxlib==0.10.2.dev20260828160853
+frx-cuda12-pjrt==0.10.2.dev20260828160853
+frx-cuda12-plugin==0.10.2.dev20260828160853
 zk-dtypes==0.0.17
